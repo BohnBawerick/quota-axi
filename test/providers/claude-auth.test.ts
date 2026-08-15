@@ -25,6 +25,7 @@ beforeEach(() => {
   vi.resetModules();
   usePlatform("linux");
   process.env.USER = "fixture-user";
+  delete process.env.CLAUDE_CONFIG_DIR;
 });
 
 afterEach(() => {
@@ -55,6 +56,7 @@ function useTempHome(): string {
   process.env.HOME = tempDir;
   process.env.USERPROFILE = tempDir;
   process.env.XDG_CACHE_HOME = join(tempDir, "cache");
+  delete process.env.CLAUDE_CONFIG_DIR;
   return tempDir;
 }
 

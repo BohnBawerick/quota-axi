@@ -21,6 +21,7 @@ const originalGrokProvider = PROVIDERS.grok;
 const originalKimiProvider = PROVIDERS.kimi;
 const originalZaiProvider = PROVIDERS.zai;
 const originalAgyProvider = PROVIDERS.agy;
+const originalOpencodeGoProvider = PROVIDERS["opencode-go"];
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 let tempDir: string | undefined;
 
@@ -33,6 +34,7 @@ afterEach(() => {
   PROVIDERS.kimi = originalKimiProvider;
   PROVIDERS.zai = originalZaiProvider;
   PROVIDERS.agy = originalAgyProvider;
+  PROVIDERS["opencode-go"] = originalOpencodeGoProvider;
   if (originalXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
   else process.env.XDG_CACHE_HOME = originalXdgCacheHome;
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
@@ -52,6 +54,7 @@ describe("CLI flag parsing", () => {
       "kimi",
       "zai",
       "agy",
+      "opencode-go",
     ]);
   });
 
@@ -87,6 +90,7 @@ describe("CLI flag parsing", () => {
           "kimi",
           "zai",
           "agy",
+          "opencode-go",
         ],
         json: true,
         full: true,
@@ -716,6 +720,7 @@ describe("default TOON decision blocks", () => {
     PROVIDERS.kimi = providerWithQuota(rateLimitedKimiQuota());
     PROVIDERS.zai = providerWithQuota(freshZaiQuota());
     PROVIDERS.agy = providerWithQuota(unavailableAgyQuota());
+    PROVIDERS["opencode-go"] = providerWithQuota(unavailableOpencodeGoQuota());
 
     const output = await capture([]);
     const named = new Set([
@@ -731,6 +736,7 @@ describe("default TOON decision blocks", () => {
       "cursor",
       "grok",
       "kimi",
+      "opencode-go",
       "zai",
     ]);
   });
@@ -1051,6 +1057,7 @@ describe("CLI plumbing via the axi SDK", () => {
     PROVIDERS.kimi = providerWithAuth("kimi", "Kimi");
     PROVIDERS.zai = providerWithAuth("zai", "Z.AI");
     PROVIDERS.agy = providerWithAuth("agy", "Antigravity");
+    PROVIDERS["opencode-go"] = providerWithAuth("opencode-go", "OpenCode Go");
 
     const output = await capture(["--allow-keychain-prompt", "auth"]);
     expect(output).toContain(
@@ -1478,6 +1485,21 @@ function unavailableAgyQuota(): ProviderQuota {
       stale: false,
       error: "Antigravity/agy is not running",
       sourcesTried: ["loopback"],
+    },
+  };
+}
+
+function unavailableOpencodeGoQuota(): ProviderQuota {
+  return {
+    provider: "opencode-go",
+    label: "OpenCode Go",
+    source: "unavailable",
+    windows: [],
+    state: {
+      status: "unavailable",
+      stale: false,
+      error: "OpenCode Go sign-in required",
+      sourcesTried: ["auth-json"],
     },
   };
 }

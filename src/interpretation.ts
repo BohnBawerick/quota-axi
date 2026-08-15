@@ -101,6 +101,8 @@ function semanticsFor(
       );
     case "cursor":
       return cursorSemantics(provider.windows, generatedAt);
+    case "opencode-go":
+      return opencodeGoSemantics(provider.windows, generatedAt);
     case "copilot":
     case "agy":
       return unknownSemantics(
@@ -397,6 +399,35 @@ function unresolvedAvailability(
       unmeasurableWindowIds,
     },
   };
+}
+
+function opencodeGoSemantics(
+  windows: QuotaWindow[],
+  generatedAt: string,
+): QuotaSemantics {
+  const recognized = windows.filter(({ id }) =>
+    ["rolling", "weekly", "monthly"].includes(id),
+  );
+  const unresolved = windows.filter(
+    ({ id }) => !["rolling", "weekly", "monthly"].includes(id),
+  );
+  const effectiveAvailability =
+    recognized.length > 0
+      ? [availability("all_models", recognized, generatedAt)]
+      : [];
+  if (unresolved.length > 0) {
+    return {
+      status: "partial",
+      description:
+        "OpenCode Go's rolling, weekly, and monthly subscription windows jointly bound usage, so effective remaining is the minimum across those named windows. Unfamiliar windows stay unresolved.",
+      effectiveAvailability,
+      unresolvedWindowIds: unresolved.map(({ id }) => id),
+    };
+  }
+  return knownSemantics(
+    effectiveAvailability,
+    "OpenCode Go's rolling, weekly, and monthly subscription windows jointly bound usage, so effective remaining is the minimum across the named windows.",
+  );
 }
 
 function availability(
