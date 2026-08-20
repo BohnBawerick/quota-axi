@@ -103,6 +103,8 @@ function semanticsFor(
       return cursorSemantics(provider.windows, generatedAt);
     case "opencode-go":
       return opencodeGoSemantics(provider.windows, generatedAt);
+    case "opencode":
+      return opencodeSemantics(provider.windows);
     case "copilot":
     case "agy":
       return unknownSemantics(
@@ -237,16 +239,13 @@ function kimiSemantics(
   untrustedWindowIds: string[],
   generatedAt: string,
 ): QuotaSemantics {
-  const unresolved = windows.filter(
-    ({ id }) => id !== "weekly" && id !== "five_hour",
-  );
+  const recognizedIds = ["weekly", "five_hour", "rolling", "monthly"];
+  const unresolved = windows.filter(({ id }) => !recognizedIds.includes(id));
   const unresolvedWindowIds = [
     ...new Set([...unresolved.map(({ id }) => id), ...untrustedWindowIds]),
   ];
   if (unresolvedWindowIds.length > 0) {
-    const recognized = windows.filter(
-      ({ id }) => id === "weekly" || id === "five_hour",
-    );
+    const recognized = windows.filter(({ id }) => recognizedIds.includes(id));
     return {
       status: "partial",
       description:
@@ -270,7 +269,7 @@ function kimiSemantics(
       : [];
   return knownSemantics(
     effectiveAvailability,
-    "Kimi's weekly and five-hour account windows jointly bound every model, so effective remaining is the minimum across the named windows.",
+    "Kimi's quota windows jointly bound every model, so effective remaining is the minimum across the named windows.",
   );
 }
 
@@ -419,15 +418,25 @@ function opencodeGoSemantics(
     return {
       status: "partial",
       description:
-        "OpenCode Go's rolling, weekly, and monthly subscription windows jointly bound usage, so effective remaining is the minimum across those named windows. Unfamiliar windows stay unresolved.",
+        "OpenCode Go is the fixed-rate subscription product (used by the Kimi CLI and Go-keyed surfaces; not the opencode CLI's prepaid Zen balance). Its rolling, weekly, and monthly subscription windows jointly bound usage, so effective remaining is the minimum across those named windows. Unfamiliar windows stay unresolved.",
       effectiveAvailability,
       unresolvedWindowIds: unresolved.map(({ id }) => id),
     };
   }
   return knownSemantics(
     effectiveAvailability,
-    "OpenCode Go's rolling, weekly, and monthly subscription windows jointly bound usage, so effective remaining is the minimum across the named windows.",
+    "OpenCode Go is the fixed-rate subscription product (used by the Kimi CLI and Go-keyed surfaces; not the opencode CLI's prepaid Zen balance). Its rolling, weekly, and monthly subscription windows jointly bound usage, so effective remaining is the minimum across the named windows.",
   );
+}
+
+function opencodeSemantics(windows: QuotaWindow[]): QuotaSemantics {
+  return {
+    status: "unknown",
+    description:
+      "OpenCode CLI on Zen uses prepaid credit with no vendor balance or quota endpoint, so remaining allowance is unmeasurable. Note: OpenCode workspace accounts also carry an unmeasured monthly spending cap that can halt workers even when subscription or credit balances appear available.",
+    effectiveAvailability: [],
+    unresolvedWindowIds: windows.map(({ id }) => id),
+  };
 }
 
 function availability(
@@ -514,9 +523,10 @@ function unknownSemantics(
   return {
     status: "unknown",
     description:
-      windows.length > 0
+      description ||
+      (windows.length > 0
         ? description
-        : "No quota windows are available, so no effective remaining percentage can be computed.",
+        : "No quota windows are available, so no effective remaining percentage can be computed."),
     effectiveAvailability: [],
     unresolvedWindowIds: windows.map(({ id }) => id),
   };

@@ -337,6 +337,7 @@ function auditBlocks(response: QuotaAxiResponse): string[] {
     provider.windows.map((window) => ({
       provider: provider.provider,
       id: window.id,
+      kind: window.kind ?? UNKNOWN,
       label: window.label,
       percentRemaining: window.percentRemaining ?? UNKNOWN,
       resetsAt: window.resetsAt ?? window.resetText ?? UNKNOWN,

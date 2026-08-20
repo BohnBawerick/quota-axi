@@ -1389,6 +1389,77 @@ describe("Claude credential-state reporting", () => {
       error: "json_parse_error",
     });
   });
+
+  it("classifies refreshable credentials as expired_refreshable instead of auth_required when access token is rejected", async () => {
+    const home = useTempHome();
+    writeClaudeCredential(home, {
+      accessToken: "expired-access-token",
+      refreshToken: "valid-refresh-token",
+      expiresAt: Date.now() - 3600_000,
+      refreshTokenExpiresAt: Date.now() + 86400_000,
+      subscriptionType: "Max",
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: "unauthorized" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { fetchQuota } = await import("../../src/providers/claude.js");
+    const result = await fetchQuota({ allowKeychainPrompt: false });
+
+    expect(result.state.status).toBe("unavailable");
+    expect(result.state.authStatus).toBe("expired_refreshable");
+    expect(result.state.error).toBe("Claude access token expired");
+
+    const advised = annotateQuotaAdvice({
+      generatedAt: "2026-08-20T12:00:00.000Z",
+      providers: [result],
+    });
+    expect(advised.providers[0]?.state.reason).toBe("credentials_expired");
+    expect(advised.providers[0]?.state.remedyCommand).toBe("claude");
+    expect(advised.help).toContain(
+      "Tell your user: open Claude Code (`claude`) once so it can refresh Claude's local OAuth token. quota-axi does not refresh credentials.",
+    );
+  });
+
+  it("enumerates both CLAUDE_CONFIG_DIR and default home when both exist", async () => {
+    const home = useTempHome();
+    const customDir = join(home, "custom-claude");
+    process.env.CLAUDE_CONFIG_DIR = customDir;
+
+    mkdirSync(customDir, { recursive: true });
+    writeFileSync(
+      join(customDir, ".credentials.json"),
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: "custom-token",
+          expiresAt: Date.now() + 3600_000,
+        },
+      }),
+    );
+
+    writeClaudeCredential(home, {
+      accessToken: "default-home-token",
+      expiresAt: Date.now() - 3600_000,
+    });
+
+    const { inspectAuth } = await import("../../src/providers/claude.js");
+    const result = await inspectAuth({ allowKeychainPrompt: false });
+
+    expect(result.sources).toContainEqual({
+      source: "oauth-file",
+      path: join(customDir, ".credentials.json"),
+      status: "available",
+    });
+    expect(result.sources).toContainEqual({
+      source: "oauth-file",
+      path: join(home, ".claude", ".credentials.json"),
+      status: "expired",
+    });
+  });
 });
 
 async function writeKeychainAccessMarker(): Promise<string> {

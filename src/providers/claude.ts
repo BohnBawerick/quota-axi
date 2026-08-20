@@ -16,6 +16,7 @@ import type {
   AuthProviderReport,
   AuthSourceReport,
   ProviderAdapter,
+  ProviderAuthStatus,
   ProviderOptions,
   ProviderQuota,
   ProviderStatus,
@@ -27,6 +28,7 @@ import {
   sourceNames,
   statusFromError,
   successProvider,
+  withAuthStatus,
   withRemaining,
 } from "./common.js";
 
@@ -48,9 +50,13 @@ const SEVEN_DAYS_SECONDS = 604_800;
 
 type ClaudeCredentials = {
   source: "oauth-file" | "keychain";
+  path?: string;
   accessToken: string;
   plan?: string;
   expiresAt?: number;
+  refreshToken?: string;
+  refreshTokenExpiresAt?: number;
+  refreshable?: boolean;
 };
 
 type AvailableCredentialState = {
@@ -229,6 +235,20 @@ export async function fetchQuota(
     }
   }
 
+  const isRefreshable = credentials.some((c) => c.refreshable === true);
+  if (isRefreshable && definitiveFailure?.status === "auth_required") {
+    const softFailure = new ClaudeFailure("Claude access token expired", {
+      status: "unavailable",
+      staleEligible: true,
+    });
+    return failureReport(
+      softFailure,
+      attempts,
+      credentialContextId,
+      "expired_refreshable",
+    );
+  }
+
   return failureReport(
     definitiveFailure ??
       transientFailure ??
@@ -242,8 +262,9 @@ function failureReport(
   failure: ClaudeFailure,
   attempts: SourceAttempt[],
   credentialContextId: string,
+  authStatus?: ProviderAuthStatus,
 ): ProviderQuota {
-  if (failure.definitiveAuth) {
+  if (failure.definitiveAuth && authStatus !== "expired_refreshable") {
     try {
       deleteCachedProvider("claude");
     } catch {
@@ -255,7 +276,7 @@ function failureReport(
     try {
       const cached = readCachedClaudeProvider(credentialContextId);
       const stale = cached
-        ? staleClaudeReport(cached, failure, attempts, Date.now())
+        ? staleClaudeReport(cached, failure, attempts, Date.now(), authStatus)
         : undefined;
       if (stale) return stale;
     } catch {
@@ -263,7 +284,7 @@ function failureReport(
     }
   }
 
-  return failedProvider({
+  const report = failedProvider({
     provider: "claude",
     label: "Claude",
     status: failure.status,
@@ -272,6 +293,7 @@ function failureReport(
     sourcesTried: sourceNames(attempts),
     attempts,
   });
+  return authStatus ? withAuthStatus(report, authStatus) : report;
 }
 
 function staleClaudeReport(
@@ -279,6 +301,7 @@ function staleClaudeReport(
   failure: ClaudeFailure,
   attempts: SourceAttempt[],
   now: number,
+  authStatus?: ProviderAuthStatus,
 ): ProviderQuota | undefined {
   if (
     cached.provider !== "claude" ||
@@ -315,6 +338,7 @@ function staleClaudeReport(
       refreshedAt: cached.state.refreshedAt,
       error: failure.code,
       ...(failure.retryAfter ? { retryAfter: failure.retryAfter } : {}),
+      ...(authStatus ? { authStatus } : {}),
       sourcesTried: [...new Set([...sourceNames(attempts), "cache"])],
     },
     attempts,
@@ -351,7 +375,7 @@ export async function inspectAuth(
         source: state.credentials.source,
         path:
           state.credentials.source === "oauth-file"
-            ? locations.credentialFile
+            ? (state.credentials.path ?? locations.credentialFile)
             : undefined,
         status: "available",
       };
@@ -493,18 +517,40 @@ function slugify(value: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
+function resolveClaudeCandidateFiles(): string[] {
+  const files: string[] = [];
+  const configuredDir = process.env.CLAUDE_CONFIG_DIR;
+  if (configuredDir?.trim()) {
+    files.push(
+      join(configuredDir.trim().normalize("NFC"), ".credentials.json"),
+    );
+  }
+  const defaultFile = join(
+    homedir().normalize("NFC"),
+    ".claude",
+    ".credentials.json",
+  );
+  if (!files.includes(defaultFile)) {
+    files.push(defaultFile);
+  }
+  return files;
+}
+
 async function readCredentialStates(
   options: ProviderOptions,
   locations = resolveClaudeProfileLocations(),
 ): Promise<CredentialState[]> {
   const states: CredentialState[] = [];
+  const candidateFiles = resolveClaudeCandidateFiles();
 
-  const fileState = extractCredentialState(
-    readJsonFileResult(locations.credentialFile),
-    "oauth-file",
-    locations.credentialFile,
-  );
-  states.push(fileState);
+  for (const file of candidateFiles) {
+    const fileState = extractCredentialState(
+      readJsonFileResult(file),
+      "oauth-file",
+      file,
+    );
+    states.push(fileState);
+  }
 
   if (process.platform === "darwin") {
     if (options.allowKeychainPrompt || hasKeychainAccessMarker(locations)) {
@@ -741,7 +787,25 @@ function extractCredentialState(
   const expiresAt = expiresAtMillis(oauth.expiresAt);
   const plan =
     stringValue(oauth.subscriptionType) ?? stringValue(data.subscriptionType);
-  const credentials = { source, accessToken, plan, expiresAt };
+  const refreshToken =
+    stringValue(oauth.refreshToken) ?? stringValue(oauth.refresh_token);
+  const refreshTokenExpiresAt = expiresAtMillis(
+    oauth.refreshTokenExpiresAt ?? oauth.refresh_token_expires_at,
+  );
+  const refreshable =
+    Boolean(refreshToken) &&
+    (refreshTokenExpiresAt === undefined || refreshTokenExpiresAt > Date.now());
+
+  const credentials: ClaudeCredentials = {
+    source,
+    path,
+    accessToken,
+    plan,
+    expiresAt,
+    refreshToken,
+    refreshTokenExpiresAt,
+    refreshable,
+  };
   if (expiresAt !== undefined && expiresAt <= Date.now()) {
     return {
       status: "expired",

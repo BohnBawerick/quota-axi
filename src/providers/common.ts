@@ -1,4 +1,5 @@
 import type {
+  ProviderAuthStatus,
   ProviderQuota,
   ProviderSource,
   ProviderStatus,
@@ -93,4 +94,17 @@ export function statusFromError(error: string): ProviderStatus {
 
 export function sourceNames(attempts: SourceAttempt[]): string[] {
   return attempts.map((attempt) => attempt.source);
+}
+
+export function withAuthStatus(
+  provider: ProviderQuota,
+  authStatus: ProviderAuthStatus,
+): ProviderQuota {
+  return {
+    ...provider,
+    state: {
+      ...provider.state,
+      authStatus,
+    },
+  };
 }

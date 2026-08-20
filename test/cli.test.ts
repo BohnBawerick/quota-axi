@@ -22,6 +22,7 @@ const originalKimiProvider = PROVIDERS.kimi;
 const originalZaiProvider = PROVIDERS.zai;
 const originalAgyProvider = PROVIDERS.agy;
 const originalOpencodeGoProvider = PROVIDERS["opencode-go"];
+const originalOpencodeProvider = PROVIDERS.opencode;
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 let tempDir: string | undefined;
 
@@ -35,6 +36,7 @@ afterEach(() => {
   PROVIDERS.zai = originalZaiProvider;
   PROVIDERS.agy = originalAgyProvider;
   PROVIDERS["opencode-go"] = originalOpencodeGoProvider;
+  PROVIDERS.opencode = originalOpencodeProvider;
   if (originalXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
   else process.env.XDG_CACHE_HOME = originalXdgCacheHome;
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
@@ -55,6 +57,7 @@ describe("CLI flag parsing", () => {
       "zai",
       "agy",
       "opencode-go",
+      "opencode",
     ]);
   });
 
@@ -91,6 +94,7 @@ describe("CLI flag parsing", () => {
           "zai",
           "agy",
           "opencode-go",
+          "opencode",
         ],
         json: true,
         full: true,
@@ -587,12 +591,12 @@ describe("CLI quota rendering", () => {
 
     const full = await capture(["--provider", "claude,codex", "--full"]);
     expect(full).toContain(
-      "windows[2]{provider,id,label,percentRemaining,resetsAt,pace,reserve,burnMultiple,timeRemainingPercent,elapsedPercent,cycleSeconds,projectedExhaustedAt,confidence}:",
+      "windows[2]{provider,id,kind,label,percentRemaining,resetsAt,pace,reserve,burnMultiple,timeRemainingPercent,elapsedPercent,cycleSeconds,projectedExhaustedAt,confidence}:",
     );
     expect(full).toContain("scopeAudit[2]{");
     expect(full).toContain("worstReserve");
     expect(full).toMatch(
-      /claude,five_hour,session,1,[^\n]*,on_pace,-1,1\.0102,2,98,18000,/,
+      /claude,five_hour,session,session,1,[^\n]*,on_pace,-1,1\.0102,2,98,18000,/,
     );
 
     const json = JSON.parse(
@@ -618,10 +622,10 @@ describe("CLI quota rendering", () => {
     const fullToon = await capture(["--provider", "kimi", "--full"]);
     expect(fullToon).toContain("kimi,unknown,api,fresh");
     expect(fullToon).toMatch(
-      /kimi,five_hour,session,81\.25,"2027-02-03T09:05:06\.000Z",/,
+      /kimi,five_hour,session,session,81\.25,"2027-02-03T09:05:06\.000Z",/,
     );
     expect(fullToon).toMatch(
-      /kimi,weekly,week,67\.5,"2027-02-08T04:05:06\.000Z",/,
+      /kimi,weekly,weekly,week,67\.5,"2027-02-08T04:05:06\.000Z",/,
     );
 
     const json = JSON.parse(
@@ -721,6 +725,7 @@ describe("default TOON decision blocks", () => {
     PROVIDERS.zai = providerWithQuota(freshZaiQuota());
     PROVIDERS.agy = providerWithQuota(unavailableAgyQuota());
     PROVIDERS["opencode-go"] = providerWithQuota(unavailableOpencodeGoQuota());
+    PROVIDERS.opencode = providerWithQuota(unmeasurableOpencodeQuota());
 
     const output = await capture([]);
     const named = new Set([
@@ -736,6 +741,7 @@ describe("default TOON decision blocks", () => {
       "cursor",
       "grok",
       "kimi",
+      "opencode",
       "opencode-go",
       "zai",
     ]);
@@ -1058,6 +1064,7 @@ describe("CLI plumbing via the axi SDK", () => {
     PROVIDERS.zai = providerWithAuth("zai", "Z.AI");
     PROVIDERS.agy = providerWithAuth("agy", "Antigravity");
     PROVIDERS["opencode-go"] = providerWithAuth("opencode-go", "OpenCode Go");
+    PROVIDERS.opencode = providerWithAuth("opencode", "OpenCode");
 
     const output = await capture(["--allow-keychain-prompt", "auth"]);
     expect(output).toContain(
@@ -1499,6 +1506,22 @@ function unavailableOpencodeGoQuota(): ProviderQuota {
       status: "unavailable",
       stale: false,
       error: "OpenCode Go sign-in required",
+      sourcesTried: ["auth-json"],
+    },
+  };
+}
+
+function unmeasurableOpencodeQuota(): ProviderQuota {
+  return {
+    provider: "opencode",
+    label: "OpenCode",
+    source: "api",
+    windows: [],
+    state: {
+      status: "fresh",
+      stale: false,
+      error:
+        "OpenCode CLI on Zen uses prepaid credit with no vendor balance or quota endpoint",
       sourcesTried: ["auth-json"],
     },
   };

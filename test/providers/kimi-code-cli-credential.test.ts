@@ -206,6 +206,37 @@ describe("Kimi Code CLI credential discovery", () => {
     await expect(source.resolve()).resolves.toEqual({ status: "error" });
     await expect(source.inspect()).resolves.toBe("error");
   });
+
+  it("reads custom provider configuration from config.toml when credentials/kimi-code.json is missing", async () => {
+    const home = temporaryDirectory();
+    const configPath = join(home, "config.toml");
+    writeFileSync(
+      configPath,
+      `default_model = "opencode-go/kimi-k3"
+
+[providers.opencode-go]
+type = "openai"
+api_key = "test-custom-opencode-go-key"
+base_url = "https://opencode.ai/zen/go/v1"
+`,
+      { mode: 0o600 },
+    );
+
+    const source = createKimiCodeCliCredentialSource({
+      environment: { KIMI_CODE_HOME: home },
+      now: () => NOW,
+    });
+
+    const resolution = await source.resolve();
+    expect(resolution).toEqual({
+      status: "available",
+      accessToken: "test-custom-opencode-go-key",
+      baseUrl: "https://opencode.ai/zen/go/v1",
+      providerType: "openai",
+      providerName: "opencode-go",
+    });
+    expect(await source.inspect()).toBe("available");
+  });
 });
 
 function temporaryDirectory(): string {

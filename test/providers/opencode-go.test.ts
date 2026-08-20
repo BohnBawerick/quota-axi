@@ -188,6 +188,9 @@ describe("opencode-go provider adapter", () => {
     expect(
       quota.quotaSemantics?.effectiveAvailability[0]?.limitingWindowIds,
     ).toEqual(["monthly"]);
+    expect(quota.quotaSemantics?.description).toContain(
+      "OpenCode Go is the fixed-rate subscription product (used by the Kimi CLI and Go-keyed surfaces; not the opencode CLI's prepaid Zen balance)",
+    );
   });
 
   it("handles missing credential gracefully", async () => {

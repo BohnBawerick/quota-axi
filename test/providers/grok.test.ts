@@ -1756,8 +1756,8 @@ describe("Grok CLI rendering regression", () => {
     });
 
     const toon = await captureCli(["--provider", "grok", "--full"]);
-    expect(toon).toContain("grok,credits,credits,100");
-    expect(toon).not.toContain("grok,credits,credits,unknown");
+    expect(toon).toContain("grok,credits,credits,credits,100");
+    expect(toon).not.toContain("grok,credits,credits,credits,unknown");
     expect(await captureCli(["--provider", "grok"])).toContain(
       "grok,all_products,100",
     );

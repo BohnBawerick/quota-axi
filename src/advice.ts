@@ -10,6 +10,8 @@ export const KEYCHAIN_ACCESS_REMEDY_COMMAND =
 export const CREDENTIALS_EXPIRED_REASON = "credentials_expired";
 export const GROK_TOKEN_REFRESH_REMEDY_COMMAND = "grok";
 export const GROK_ACCESS_TOKEN_EXPIRED_ERROR = "Grok access token expired";
+export const CLAUDE_TOKEN_REFRESH_REMEDY_COMMAND = "claude";
+export const CLAUDE_ACCESS_TOKEN_EXPIRED_ERROR = "Claude access token expired";
 
 export function annotateQuotaAdvice(
   response: Omit<QuotaAxiResponse, "schemaVersion">,
@@ -56,6 +58,16 @@ function annotateProviderAdvice(provider: ProviderQuota): ProviderQuota {
       },
     };
   }
+  if (needsClaudeTokenRefreshAdvice(provider)) {
+    return {
+      ...provider,
+      state: {
+        ...provider.state,
+        reason: CREDENTIALS_EXPIRED_REASON,
+        remedyCommand: CLAUDE_TOKEN_REFRESH_REMEDY_COMMAND,
+      },
+    };
+  }
   return provider;
 }
 
@@ -75,6 +87,14 @@ function needsGrokTokenRefreshAdvice(provider: ProviderQuota): boolean {
     provider.state.status !== "fresh" &&
     provider.state.authStatus === "expired_refreshable" &&
     provider.state.error === GROK_ACCESS_TOKEN_EXPIRED_ERROR
+  );
+}
+
+function needsClaudeTokenRefreshAdvice(provider: ProviderQuota): boolean {
+  return (
+    provider.provider === "claude" &&
+    provider.state.status !== "fresh" &&
+    provider.state.authStatus === "expired_refreshable"
   );
 }
 
@@ -115,6 +135,8 @@ function providerHelpLines(provider: ProviderQuota): string[] {
   if (hasKeychainAccessAdvice(provider))
     return [keychainAccessHelpLine(provider)];
   if (hasGrokTokenRefreshAdvice(provider)) return [grokTokenRefreshHelpLine()];
+  if (hasClaudeTokenRefreshAdvice(provider))
+    return [claudeTokenRefreshHelpLine()];
   return [];
 }
 
@@ -132,10 +154,21 @@ function hasGrokTokenRefreshAdvice(provider: ProviderQuota): boolean {
   );
 }
 
+function hasClaudeTokenRefreshAdvice(provider: ProviderQuota): boolean {
+  return (
+    provider.state.reason === CREDENTIALS_EXPIRED_REASON &&
+    provider.state.remedyCommand === CLAUDE_TOKEN_REFRESH_REMEDY_COMMAND
+  );
+}
+
 function keychainAccessHelpLine(provider: ProviderQuota): string {
   return `Tell your user: run \`${KEYCHAIN_ACCESS_REMEDY_COMMAND}\` once and approve Keychain access ("Always Allow") so quota-axi can read ${provider.provider}'s live quota.`;
 }
 
 function grokTokenRefreshHelpLine(): string {
   return `Tell your user: open the Grok CLI (\`${GROK_TOKEN_REFRESH_REMEDY_COMMAND}\`) once so it can refresh Grok's local session token. quota-axi does not refresh credentials.`;
+}
+
+function claudeTokenRefreshHelpLine(): string {
+  return `Tell your user: open Claude Code (\`${CLAUDE_TOKEN_REFRESH_REMEDY_COMMAND}\`) once so it can refresh Claude's local OAuth token. quota-axi does not refresh credentials.`;
 }

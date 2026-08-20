@@ -244,6 +244,52 @@ describe("Kimi request transport", () => {
     }
   });
 
+  it("fetches OpenCode Go usage windows when CLI credential is configured with Go baseUrl", async () => {
+    const request = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        jsonResponse({
+          usage: {
+            rolling: { status: "ok", percent: 1 },
+            weekly: { status: "ok", percent: 98 },
+            monthly: { status: "ok", percent: 49 },
+          },
+        }),
+    );
+    const cliSource = cliCredentialSource({
+      status: "available",
+      accessToken: "test-go-key",
+      baseUrl: "https://opencode.ai/zen/go/v1",
+      providerType: "openai",
+      providerName: "opencode-go",
+    });
+
+    const report = await testAdapter({
+      broker: broker({ status: "missing" }),
+      cliCredentialSource: cliSource,
+      fetch: request,
+    }).fetchQuota(OPTIONS);
+
+    expect(request).toHaveBeenCalledWith(
+      "https://opencode.ai/zen/go/v1/usage",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer test-go-key",
+        }),
+      }),
+    );
+    expect(report.state.status).toBe("fresh");
+    expect(report.windows).toHaveLength(3);
+    expect(
+      report.windows.find((w) => w.id === "weekly")?.percentRemaining,
+    ).toBe(2);
+    expect(
+      report.windows.find((w) => w.id === "rolling")?.percentRemaining,
+    ).toBe(99);
+    expect(
+      report.windows.find((w) => w.id === "monthly")?.percentRemaining,
+    ).toBe(51);
+  });
+
   it("coalesces concurrent acquisitions into one provider request", async () => {
     let finish: ((response: Response) => void) | undefined;
     const request = vi.fn(

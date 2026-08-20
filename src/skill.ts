@@ -3,7 +3,7 @@ import { DESCRIPTION, TOP_HELP } from "./cli.js";
 // Trigger string Claude Code (and other agents) match against to auto-load the skill.
 // Kept terse and outcome-focused so it fires on "check quota/rate limits" intents.
 export const SKILL_DESCRIPTION =
-  "Report local Claude, Codex, Cursor, GitHub Copilot, Grok, Kimi, Z.AI, OpenCode Go, and Antigravity quota windows via the quota-axi CLI - remaining " +
+  "Report local Claude, Codex, Cursor, GitHub Copilot, Grok, Kimi, Z.AI, OpenCode Go, OpenCode, and Antigravity quota windows via the quota-axi CLI - remaining " +
   "effective usable runway, percentages, reset times, cycle-average pace vs the reset clock, a per-scope selection signal, and provider status read from local auth sources, " +
   "with no routing, provider mutation, or default ordering preference. Use before deciding whether it is safe " +
   "to keep spending a provider's quota, when the user asks about usage, rate limits, pace, or " +
@@ -27,6 +27,7 @@ export const HERMES_TAGS = [
   "zai",
   "agy",
   "opencode-go",
+  "opencode",
   "antigravity",
   "cli",
 ];
@@ -107,8 +108,11 @@ or when comparing supported local provider headroom side by side.
    across every authoritative bound: \`projected_exhaustion\` supplies the earliest finite
    \`usableRunwaySeconds\`, \`projectedExhaustedAt\`, limiting window, and confidence; \`through_reset\`
    deliberately has no synthetic deadline; \`exhausted_now\` is zero runway; and \`unknown\` names
-   unmeasurable bounds instead of inventing a conclusion. Read each window's \`pace\` (and the
-   effective scope's pace summary) for diagnostics. Each scope also carries \`selection\`: when its
+   unmeasurable bounds instead of inventing a conclusion. Read each window's \`kind\`
+   (\`session\`/\`weekly\`/\`monthly\`/\`credits\`/\`model\`/\`unknown\`) and \`pace\` (and the
+   effective scope's pace summary) for diagnostics. Default TOON has no per-window rows, so
+   \`kind\` is not a default-TOON column; it stays in \`--json\` and the \`--full\` \`windows[]\`
+   audit block. Each scope also carries \`selection\`: when its
    \`status\` is \`known\`, \`spendPriority\` is a signed, cycle-weighted scalar clamped to
    [-100, 100] where positive means that scope's paid allowance is on track to reach reset unused,
    \`0\` is exact utilization, and negative means it is overdrawn against the reset clock. It is
@@ -152,6 +156,10 @@ or when comparing supported local provider headroom side by side.
    \`\${CURSOR_CLI_CONFIG}\` or the XDG \`cursor/auth.json\` path. quota-axi never reads a Cursor
    refresh token, so an expired CLI access token requires \`cursor-agent login\`. Legacy Claude
    markers are not reused.
+   For Claude quota, \`authStatus: expired_refreshable\` with \`reason: credentials_expired\` /
+   \`remedyCommand: claude\` means a valid refresh token is still present; tell your user to open
+   Claude Code once. That is not a false \`auth_required\` sign-out, and quota-axi still does not
+   refresh credentials. Stale Claude fallback stays scoped to the current credential context.
 7. For Grok, read \`state.authStatus\` before any logout wording. \`expired_refreshable\` means a
    local session still looks signed in but short-lived access expired and a bounded read-only
    liveness attempt could not validate it (an empirically live stored-expired bearer reports
@@ -172,9 +180,13 @@ or when comparing supported local provider headroom side by side.
    unavailable, quota-axi may reuse a fresh official Kimi Code CLI access token from
    \`$KIMI_CODE_HOME/credentials/kimi-code.json\` (default
    \`$HOME/.kimi-code/credentials/kimi-code.json\`) without refreshing or writing credentials.
-   Grok also reads that same Pi auth file for an independent \`xai\` OAuth or literal API-key
-   entry and treats Grok as usable when either the Grok CLI session or Pi \`xai\` credential is
-   valid.
+   The Kimi Code CLI also reads \`~/.kimi-code/config.toml\`: a \`base_url\` targeting \`/zen/go\`
+   measures the Go usage endpoint via the shared opencode-go normalizer; other non-Moonshot
+   surfaces report \`authStatus: usable\` with empty windows rather than inventing Moonshot
+   percentages. \`kimiSemantics\` recognizes \`weekly\`, \`five_hour\`, \`rolling\`, and \`monthly\`
+   window ids. Grok also reads that same Pi auth file for an independent \`xai\` OAuth or literal
+   API-key entry and treats Grok as usable when either the Grok CLI session or Pi \`xai\`
+   credential is valid.
 10. For Z.AI, quota-axi reads the Coding Plan API key from opencode's \`auth.json\`
     (\`zai-coding-plan\`, plus \`zai\`/\`zhipu\` aliases). It reports the five-hour and weekly token
     windows as one \`all_models\` bound and the monthly MCP tool window as a separate \`tools\`
@@ -186,6 +198,13 @@ or when comparing supported local provider headroom side by side.
     \`remainingFraction\`/\`resetTime\` (or model config fallbacks). Window relationships are
     unknown, so there is no combined remaining percentage. Pace stays unknown because the
     snapshot has no honest burn-rate history.
+12. \`opencode-go\` is the fixed-rate Go subscription product used by the Kimi CLI and Go-keyed
+    surfaces, not the opencode CLI's prepaid Zen balance. \`opencode\` reports that prepaid CLI
+    as unmeasurable (\`windows: []\`) and notes the unmeasured workspace monthly spending cap.
+    Every window carries a normalized \`kind\` (\`session\`, \`weekly\`, \`monthly\`, \`credits\`,
+    \`model\`, \`unknown\`) in the in-memory model, default \`--json\`, and the \`--full\`
+    \`windows[]\` audit block. Default TOON has no per-window rows, so kind is not a default-TOON
+    column.
 
 ## Usage
 

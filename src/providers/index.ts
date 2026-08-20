@@ -5,6 +5,7 @@ import { copilotAdapter } from "./copilot.js";
 import { cursorAdapter } from "./cursor.js";
 import { grokAdapter } from "./grok.js";
 import { kimiAdapter } from "./kimi.js";
+import { opencodeAdapter } from "./opencode.js";
 import { opencodeGoAdapter } from "./opencode-go.js";
 import { zaiAdapter } from "./zai.js";
 import {
@@ -23,6 +24,7 @@ export const PROVIDERS: Record<ProviderId, ProviderAdapter> = {
   zai: zaiAdapter,
   agy: agyAdapter,
   "opencode-go": opencodeGoAdapter,
+  opencode: opencodeAdapter,
 };
 
 export function parseProviders(value: string | undefined): ProviderId[] {

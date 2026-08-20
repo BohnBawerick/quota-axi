@@ -7,8 +7,26 @@ export const KIMI_CODE_CLI_CREDENTIAL_SOURCE = "kimi-code-cli";
 const CREDENTIAL_FILE_LIMIT_BYTES = 64 * 1024;
 const MINIMUM_FRESHNESS_SECONDS = 60;
 
+export type KimiProviderConfig = {
+  type?: string;
+  apiKey?: string;
+  baseUrl?: string;
+};
+
+export type KimiCliConfig = {
+  defaultModel?: string;
+  providers: Record<string, KimiProviderConfig>;
+};
+
 export type KimiCodeCliCredentialResolution =
-  | { status: "available"; accessToken: string }
+  | {
+      status: "available";
+      accessToken: string;
+      baseUrl?: string;
+      providerType?: string;
+      providerName?: string;
+      configPath?: string;
+    }
   | { status: "missing" | "invalid" | "expired" | "error" };
 
 export type KimiCodeCliCredentialInspection =
@@ -53,43 +71,135 @@ async function resolveCredential(
   let contents: Buffer;
   try {
     contents = await dependencies.readFile(path, CREDENTIAL_FILE_LIMIT_BYTES);
+    if (contents.byteLength > CREDENTIAL_FILE_LIMIT_BYTES) {
+      return { status: "invalid" };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(contents.toString("utf8")) as unknown;
+    } catch {
+      return { status: "invalid" };
+    }
+    const credential = objectValue(parsed);
+    const accessToken =
+      typeof credential?.access_token === "string"
+        ? credential.access_token.trim()
+        : "";
+    const expiresAt = expirySeconds(credential?.expires_at);
+    if (!accessToken || expiresAt === undefined) return { status: "invalid" };
+    if (expiresAt <= dependencies.now() / 1_000 + MINIMUM_FRESHNESS_SECONDS) {
+      return { status: "expired" };
+    }
+    return { status: "available", accessToken };
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") {
+      return { status: "error" };
+    }
+  }
+
+  // If credentials/kimi-code.json does not exist, check config.toml
+  const tomlPath = configFilePath(dependencies);
+  try {
+    const tomlContents = await dependencies.readFile(
+      tomlPath,
+      CREDENTIAL_FILE_LIMIT_BYTES,
+    );
+    const config = parseKimiConfigToml(tomlContents.toString("utf8"));
+    const selectedProviderName =
+      (config.defaultModel
+        ? config.defaultModel.split("/")[0]?.trim()
+        : undefined) ?? Object.keys(config.providers)[0];
+
+    const provider = selectedProviderName
+      ? (config.providers[selectedProviderName] ??
+        Object.values(config.providers)[0])
+      : Object.values(config.providers)[0];
+
+    if (provider && provider.apiKey?.trim()) {
+      return {
+        status: "available",
+        accessToken: provider.apiKey.trim(),
+        baseUrl: provider.baseUrl?.trim(),
+        providerType: provider.type?.trim(),
+        providerName: selectedProviderName,
+      };
+    }
+    return { status: "missing" };
   } catch (error) {
     return errorCode(error) === "ENOENT"
       ? { status: "missing" }
       : { status: "error" };
   }
-  if (contents.byteLength > CREDENTIAL_FILE_LIMIT_BYTES) {
-    return { status: "invalid" };
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(contents.toString("utf8")) as unknown;
-  } catch {
-    return { status: "invalid" };
-  }
-  const credential = objectValue(parsed);
-  const accessToken =
-    typeof credential?.access_token === "string"
-      ? credential.access_token.trim()
-      : "";
-  const expiresAt = expirySeconds(credential?.expires_at);
-  if (!accessToken || expiresAt === undefined) return { status: "invalid" };
-  if (expiresAt <= dependencies.now() / 1_000 + MINIMUM_FRESHNESS_SECONDS) {
-    return { status: "expired" };
-  }
-  return { status: "available", accessToken };
 }
 
-function credentialPath(dependencies: CredentialSourceDependencies): string {
+export function parseKimiConfigToml(content: string): KimiCliConfig {
+  const config: KimiCliConfig = { providers: {} };
+  const lines = content.split("\n");
+  let currentProvider: string | undefined;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const defaultModelMatch = trimmed.match(
+      /^default_model\s*=\s*["']([^"']+)["']/,
+    );
+    if (defaultModelMatch) {
+      config.defaultModel = defaultModelMatch[1];
+      continue;
+    }
+
+    const providerSectionMatch = trimmed.match(
+      /^\[providers\.([a-zA-Z0-9._-]+)\]$/,
+    );
+    if (providerSectionMatch) {
+      currentProvider = providerSectionMatch[1];
+      config.providers[currentProvider] ??= {};
+      continue;
+    }
+
+    if (trimmed.startsWith("[") && !trimmed.startsWith("[providers.")) {
+      currentProvider = undefined;
+      continue;
+    }
+
+    if (currentProvider) {
+      const kvMatch = trimmed.match(/^([a-zA-Z0-9_-]+)\s*=\s*["']([^"']*)["']/);
+      if (kvMatch) {
+        const [, key, val] = kvMatch;
+        const prov = config.providers[currentProvider]!;
+        if (key === "api_key" || key === "apiKey") {
+          prov.apiKey = val;
+        } else if (key === "base_url" || key === "baseUrl") {
+          prov.baseUrl = val;
+        } else if (key === "type") {
+          prov.type = val;
+        }
+      }
+    }
+  }
+
+  return config;
+}
+
+function kimiHomeDirectory(dependencies: CredentialSourceDependencies): string {
   const configuredHome = nonempty(dependencies.environment.KIMI_CODE_HOME);
-  const codeHome =
+  return (
     configuredHome ??
     join(
       nonempty(dependencies.environment.HOME) ?? dependencies.homeDirectory(),
       ".kimi-code",
-    );
-  return join(codeHome, "credentials", "kimi-code.json");
+    )
+  );
+}
+
+function configFilePath(dependencies: CredentialSourceDependencies): string {
+  return join(kimiHomeDirectory(dependencies), "config.toml");
+}
+
+function credentialPath(dependencies: CredentialSourceDependencies): string {
+  return join(kimiHomeDirectory(dependencies), "credentials", "kimi-code.json");
 }
 
 async function readBoundedFile(

@@ -18,6 +18,7 @@ import {
   type KimiCodeCliCredentialResolution,
   type KimiCodeCliCredentialSource,
 } from "./kimi-code-cli-credential.js";
+import { normalizeOpencodeGoUsage } from "./opencode-go.js";
 import {
   createPiKimiCredentialBroker,
   type KimiCredentialBroker,
@@ -220,6 +221,82 @@ async function acquireKimiQuota(
       }
       credential = cliResolution.accessToken;
       credentialSource = KIMI_CODE_CLI_CREDENTIAL_SOURCE;
+
+      if (cliResolution.baseUrl?.includes("/zen/go")) {
+        const usageUrl = `${cliResolution.baseUrl.replace(/\/+$/, "")}/usage`;
+        const response = await dependencies.fetch(usageUrl, {
+          headers: {
+            Authorization: `Bearer ${cliResolution.accessToken}`,
+            "User-Agent": USER_AGENT,
+            Accept: "application/json",
+          },
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 403) {
+            throw new KimiFailure("kimi_credential_invalid", {
+              status: "auth_required",
+              definitiveAuth: true,
+            });
+          }
+          throw new KimiFailure(
+            `Kimi usage endpoint returned ${response.status}`,
+            { staleEligible: true },
+          );
+        }
+        const text = await response.text();
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          throw new KimiFailure("invalid_json_response", {
+            staleEligible: true,
+          });
+        }
+        const normalized = normalizeOpencodeGoUsage(parsed);
+        const refreshedAt = new Date(dependencies.now()).toISOString();
+        attempts[attempts.length - 1] = {
+          source: credentialSource,
+          status: "success",
+        };
+        return {
+          provider: "kimi",
+          label: "Kimi",
+          source: "api",
+          plan: "Zen Go",
+          windows: normalized ? normalized.windows : [],
+          state: {
+            status: "fresh",
+            stale: false,
+            refreshedAt,
+            sourcesTried: attempts.map(({ source }) => source),
+          },
+          attempts,
+        };
+      } else if (
+        cliResolution.baseUrl &&
+        !cliResolution.baseUrl.includes("api.kimi.com")
+      ) {
+        const refreshedAt = new Date(dependencies.now()).toISOString();
+        attempts[attempts.length - 1] = {
+          source: credentialSource,
+          status: "success",
+        };
+        return {
+          provider: "kimi",
+          label: "Kimi",
+          source: "api",
+          windows: [],
+          state: {
+            status: "fresh",
+            stale: false,
+            refreshedAt,
+            authStatus: "usable",
+            sourcesTried: attempts.map(({ source }) => source),
+          },
+          attempts,
+        };
+      }
     }
 
     const payload = await requestKimiQuota(
