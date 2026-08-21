@@ -22,5 +22,7 @@ describe("published package contract", () => {
       { cwd: process.cwd(), encoding: "utf8" },
     );
     expect(typecheck.status, `${typecheck.stdout}${typecheck.stderr}`).toBe(0);
-  });
+    // Shells out to a whole tsc process, which outruns the default 5s budget
+    // on slower machines.
+  }, 60_000);
 });

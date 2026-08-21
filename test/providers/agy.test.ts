@@ -17,6 +17,7 @@ import {
   type AgyConnectionEndpoint,
   type AgyProbeRuntime,
 } from "../../src/providers/agy.js";
+import type { AgyCloudCodeResult } from "../../src/providers/agy-cloudcode.js";
 import type { ProviderQuota } from "../../src/types.js";
 
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
@@ -546,17 +547,21 @@ function runtimeWith(options: {
   ps?: string;
   lsof?: string;
   psError?: Error;
+  psErrorForArgs?: (args: string[]) => Error | undefined;
   lsofError?: Error;
   lsofByPid?: Record<number, string | Error>;
   requestJson?: AgyProbeRuntime["requestJson"];
   responses?: Record<string, unknown>;
   onExec?: (command: string, args: string[]) => void;
   onRequest?: (endpoint: AgyConnectionEndpoint, path: string) => void;
+  cloudCode?: AgyProbeRuntime["cloudCode"];
 }): AgyProbeRuntime {
   return {
+    ...(options.cloudCode ? { cloudCode: options.cloudCode } : {}),
     async execFileText(command, args) {
       options.onExec?.(command, args);
       if (command === "ps") {
+        if (options.psErrorForArgs?.(args)) throw options.psErrorForArgs(args);
         if (options.psError) throw options.psError;
         return options.ps ?? "";
       }
@@ -642,5 +647,227 @@ function cachedAgyQuota(): ProviderQuota {
       refreshedAt: "2026-06-15T11:39:34.000Z",
       sourcesTried: ["loopback"],
     },
+  };
+}
+
+describe("Antigravity direct quota read", () => {
+  it("still reports quota when no local Antigravity process is discoverable", async () => {
+    // Regression: procps-ng rejects the BSD `-x` flag, so discovery raised
+    // "Antigravity process discovery failed" and the provider gave up even
+    // though the account's quota was readable from a local credential.
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        psError: new Error("ps: error: must set personality to get -x option"),
+        cloudCode: cloudCodeReturning({
+          status: "quota",
+          summary: fixture("cloudcode-quota-summary.json"),
+          email: "person@example.invalid",
+        }),
+      }),
+    );
+
+    expect(result.state.status).toBe("fresh");
+    expect(result.source).toBe("oauth");
+    expect(result.state.authStatus).toBe("usable");
+    expect(result.account?.email).toBe("person@example.invalid");
+    expect(result.windows.map((window) => window.id)).toEqual([
+      "gemini_5h",
+      "gemini_weekly",
+      "claude_gpt_weekly",
+    ]);
+    expect(result.attempts).toEqual([
+      {
+        source: "loopback",
+        status: "failed",
+        error: "Antigravity process discovery failed",
+      },
+      { source: "api", status: "success", credentialPresent: true },
+    ]);
+  });
+
+  it("retries process discovery without the BSD -x flag procps rejects", async () => {
+    const attempted: string[][] = [];
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /home/test/.local/bin/agy\n",
+        lsof: lsofFor(123, 64440),
+        psErrorForArgs: (args) =>
+          args.includes("-x")
+            ? new Error("ps: error: must set personality to get -x option")
+            : undefined,
+        onExec: (command, args) => {
+          if (command === "ps") attempted.push(args);
+        },
+        responses: {
+          "https:64440:/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary":
+            fixture("quota-summary.json"),
+          "https:64440:/exa.language_server_pb.LanguageServerService/GetUserStatus":
+            fixture("user-status.json"),
+        },
+      }),
+    );
+
+    expect(attempted.map((args) => args.includes("-x"))).toEqual([true, false]);
+    expect(result.state.status).toBe("fresh");
+    expect(result.source).toBe("cli-rpc");
+  });
+
+  it("prefers a running Antigravity process over the direct read", async () => {
+    let directReads = 0;
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "123 /home/test/.local/bin/agy\n",
+        lsof: lsofFor(123, 64440),
+        responses: {
+          "https:64440:/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary":
+            fixture("quota-summary.json"),
+          "https:64440:/exa.language_server_pb.LanguageServerService/GetUserStatus":
+            fixture("user-status.json"),
+        },
+        cloudCode: cloudCodeReturning(
+          {
+            status: "quota",
+            summary: fixture("cloudcode-quota-summary.json"),
+          },
+          () => {
+            directReads += 1;
+          },
+        ),
+      }),
+    );
+
+    expect(result.source).toBe("cli-rpc");
+    expect(directReads).toBe(0);
+  });
+
+  it("keeps the loopback verdict when no local credential is stored", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        cloudCode: cloudCodeReturning({ status: "credential_missing" }),
+      }),
+    );
+
+    expect(result.state.status).toBe("unavailable");
+    expect(result.state.error).toBe("Antigravity/agy is not running");
+    expect(result.attempts?.at(-1)).toEqual({
+      source: "auth-json",
+      status: "skipped",
+      error: "credentials_missing",
+    });
+  });
+
+  it("reports a rejected unexpired credential as sign-in required", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        cloudCode: cloudCodeReturning({
+          status: "auth_rejected",
+          error: "Antigravity sign-in required",
+          storedExpired: false,
+          refreshable: true,
+        }),
+      }),
+    );
+
+    expect(result.state.status).toBe("auth_required");
+    expect(result.state.authStatus).toBe("unusable");
+    expect(result.state.reason).toBeUndefined();
+  });
+
+  it("treats rejected stored expiry as refreshable expiry, not a sign-out", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        cloudCode: cloudCodeReturning({
+          status: "auth_rejected",
+          error: "Antigravity access token expired",
+          storedExpired: true,
+          refreshable: true,
+        }),
+      }),
+    );
+
+    expect(result.state.status).toBe("unavailable");
+    expect(result.state.authStatus).toBe("expired_refreshable");
+    expect(result.state.reason).toBe("credentials_expired");
+  });
+
+  it("reports an entitlement refusal without claiming the credential is bad", async () => {
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        cloudCode: cloudCodeReturning({
+          status: "not_entitled",
+          error: "Antigravity account is not licensed for Antigravity quota",
+        }),
+      }),
+    );
+
+    expect(result.state.status).toBe("error");
+    expect(result.state.authStatus).toBe("usable");
+    expect(result.state.error).toBe(
+      "Antigravity account is not licensed for Antigravity quota",
+    );
+  });
+
+  it("falls back to a cached snapshot when the direct read is unavailable", async () => {
+    writeCachedProviders([cachedAgyQuota()]);
+
+    const result = await fetchQuotaWithRuntime(
+      runtimeWith({
+        ps: "",
+        cloudCode: cloudCodeReturning({ status: "rate_limited" }),
+      }),
+    );
+
+    expect(result.state.status).toBe("stale");
+    expect(result.state.stale).toBe(true);
+    expect(result.windows.map((window) => window.id)).toEqual(["gemini_5h"]);
+  });
+
+  it("reports the credential source alongside loopback in auth inspection", async () => {
+    const report = await inspectAuthWithRuntime(
+      runtimeWith({
+        ps: "",
+        cloudCode: {
+          fetchQuota: () => {
+            throw new Error("auth inspection must not read quota");
+          },
+          inspectCredential: async () => ({
+            status: "available",
+            credential: "fixture-access-token",
+            refreshable: true,
+          }),
+        },
+      }),
+    );
+
+    expect(report.sources.map((source) => source.source)).toEqual([
+      "loopback",
+      "auth-json",
+    ]);
+    expect(report.sources[1]).toMatchObject({
+      status: "available",
+      credentialPresent: true,
+    });
+    expect(JSON.stringify(report)).not.toContain("fixture-access-token");
+  });
+});
+
+function cloudCodeReturning(
+  result: AgyCloudCodeResult,
+  onFetch?: () => void,
+): NonNullable<AgyProbeRuntime["cloudCode"]> {
+  return {
+    fetchQuota: async () => {
+      onFetch?.();
+      return result;
+    },
+    inspectCredential: async () => ({
+      status: "available",
+      credential: "fixture-access-token",
+      refreshable: true,
+    }),
   };
 }

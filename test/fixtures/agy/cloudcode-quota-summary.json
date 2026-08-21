@@ -1,0 +1,50 @@
+{
+  "groups": [
+    {
+      "displayName": "Gemini Models",
+      "description": "Models within this group: Gemini Flash, Gemini Pro",
+      "buckets": [
+        {
+          "bucketId": "gemini-weekly",
+          "displayName": "Weekly Limit Remaining",
+          "window": "weekly",
+          "resetTime": "2026-08-26T15:46:04Z",
+          "description": "You have used some of your weekly limit, it will fully refresh in 5 days, 1 hour.",
+          "remainingFraction": 0.35
+        },
+        {
+          "bucketId": "gemini-5h",
+          "displayName": "Five Hour Limit Remaining",
+          "window": "5h",
+          "resetTime": "2026-08-21T14:56:09Z",
+          "description": "You have used some of your 5-hour limit, it will fully refresh in 31 minutes.",
+          "remainingFraction": 0.025
+        }
+      ]
+    },
+    {
+      "displayName": "Claude and GPT models",
+      "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+      "buckets": [
+        {
+          "bucketId": "3p-weekly",
+          "displayName": "Weekly Limit Remaining",
+          "window": "weekly",
+          "resetTime": "2026-08-22T13:21:02Z",
+          "description": "You have hit your weekly limit, it refreshes in 22 hours, 56 minutes.",
+          "remainingFraction": 0
+        },
+        {
+          "bucketId": "3p-5h",
+          "displayName": "Five Hour Limit Remaining",
+          "window": "5h",
+          "resetTime": "2026-08-21T19:24:40Z",
+          "description": "You have hit your weekly limit, the 5-hour limit does not currently apply.",
+          "disabled": true,
+          "remainingFraction": 1
+        }
+      ]
+    }
+  ],
+  "description": "Within each group, models share a weekly limit and a 5-hour limit."
+}

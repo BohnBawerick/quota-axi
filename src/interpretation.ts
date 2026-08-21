@@ -105,13 +105,62 @@ function semanticsFor(
       return opencodeGoSemantics(provider.windows, generatedAt);
     case "opencode":
       return opencodeSemantics(provider.windows);
-    case "copilot":
     case "agy":
+      return agySemantics(provider.windows, generatedAt);
+    case "copilot":
       return unknownSemantics(
         provider.windows,
         `quota-axi does not know whether ${provider.label ?? provider.provider}'s reported windows are independent or jointly bounding, so it does not claim an effective remaining percentage.`,
       );
   }
+}
+
+/**
+ * Antigravity's quota summary is self-describing: "Within each group, models
+ * share a weekly limit and a 5-hour limit." Each model group is therefore its
+ * own scope, jointly bounded by that group's windows, and groups never bound
+ * each other.
+ */
+const AGY_WINDOW_KIND_SUFFIXES = ["_5h", "_weekly", "_unknown"];
+
+function agySemantics(
+  windows: QuotaWindow[],
+  generatedAt: string,
+): QuotaSemantics {
+  const groups = new Map<string, QuotaWindow[]>();
+  const unresolved: QuotaWindow[] = [];
+  for (const window of windows) {
+    const scope = agyScope(window.id);
+    if (!scope) {
+      unresolved.push(window);
+      continue;
+    }
+    groups.set(scope, [...(groups.get(scope) ?? []), window]);
+  }
+
+  const effectiveAvailability: EffectiveAvailability[] = [...groups].map(
+    ([scope, scopeWindows]) => availability(scope, scopeWindows, generatedAt),
+  );
+  if (unresolved.length > 0) {
+    return {
+      status: "partial",
+      description:
+        "Antigravity groups models into quota tiers whose 5-hour and weekly windows jointly bound that group, so effective remaining is the minimum across a group's windows. Unfamiliar windows stay unresolved.",
+      effectiveAvailability,
+      unresolvedWindowIds: unresolved.map(({ id }) => id),
+    };
+  }
+  return knownSemantics(
+    effectiveAvailability,
+    "Antigravity groups models into quota tiers whose 5-hour and weekly windows jointly bound that group, so effective remaining is the minimum across that group's named windows. Separate groups do not bound each other.",
+  );
+}
+
+function agyScope(id: string): string | undefined {
+  const suffix = AGY_WINDOW_KIND_SUFFIXES.find(
+    (candidate) => id.endsWith(candidate) && id.length > candidate.length,
+  );
+  return suffix ? `${id.slice(0, -suffix.length)}_models` : undefined;
 }
 
 function claudeSemantics(

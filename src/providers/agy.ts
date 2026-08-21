@@ -1,6 +1,7 @@
 import * as http from "node:http";
 import * as https from "node:https";
 import { deleteCachedProvider, readCachedProvider } from "../cache.js";
+import { collapseHome } from "../lib/fs.js";
 import { execFileText } from "../lib/process.js";
 import {
   clampPercent,
@@ -10,13 +11,21 @@ import {
 } from "../lib/time.js";
 import type {
   AuthProviderReport,
+  AuthSourceReport,
   ProviderAdapter,
+  ProviderAuthStatus,
   ProviderOptions,
   ProviderQuota,
+  ProviderStateReason,
   ProviderStatus,
   QuotaWindow,
   SourceAttempt,
 } from "../types.js";
+import {
+  type AgyCloudCodeSource,
+  defaultCloudCodeSource,
+} from "./agy-cloudcode.js";
+import { piAntigravityAuthFilePath } from "./pi-antigravity-credential.js";
 import {
   failedProvider,
   sourceNames,
@@ -71,6 +80,12 @@ export type AgyProbeRuntime = {
     path: string,
     timeoutMs: number,
   ): Promise<unknown>;
+  /**
+   * Direct read of the same quota RPC from the locally stored Antigravity
+   * credential, used when no local Antigravity process is discoverable.
+   * Omitted by callers that exercise only the loopback path.
+   */
+  cloudCode?: AgyCloudCodeSource;
 };
 
 export const agyAdapter: ProviderAdapter = {
@@ -116,13 +131,33 @@ export async function fetchQuotaWithRuntime(
     };
   }
 
+  // Antigravity does not have to be running: the same quota RPC is readable
+  // directly from the locally stored Antigravity credential.
+  const direct = await fetchDirectQuota(runtime, attempts);
+  if (direct.kind === "quota") return direct.quota;
+
   const finalError = errorMessage(finalFailure);
+  if (direct.kind === "verdict") {
+    if (direct.status === "auth_required") {
+      try {
+        deleteCachedProvider("agy");
+      } catch {
+        // Cache retirement is best effort; preserve the definitive verdict.
+      }
+    }
+    return directVerdict(direct, sourceNames(attempts), attempts);
+  }
+  if (direct.kind === "failure") {
+    finalFailure = strongerFailure(finalFailure, direct.error);
+  }
+
+  const resolvedError = errorMessage(finalFailure) || finalError;
   if (staleEligibleFailure(finalFailure)) {
     const cached = readCachedProvider("agy");
     if (cached) {
       return staleFromCache(
         cached,
-        finalError,
+        resolvedError,
         sourceNames(attempts),
         attempts,
       );
@@ -138,11 +173,156 @@ export async function fetchQuotaWithRuntime(
   return failedProvider({
     provider: "agy",
     label: "Antigravity",
-    status: statusForError(finalError),
-    error: finalError,
+    status: statusForError(resolvedError),
+    error: resolvedError,
     sourcesTried: sourceNames(attempts),
     attempts,
   });
+}
+
+type AgyDirectOutcome =
+  | { kind: "quota"; quota: ProviderQuota }
+  | { kind: "skipped" }
+  | { kind: "failure"; error: Error }
+  | {
+      kind: "verdict";
+      status: ProviderStatus;
+      error: string;
+      authStatus: ProviderAuthStatus;
+      reason?: ProviderStateReason;
+    };
+
+async function fetchDirectQuota(
+  runtime: AgyProbeRuntime,
+  attempts: SourceAttempt[],
+): Promise<AgyDirectOutcome> {
+  const cloudCode = runtime.cloudCode;
+  if (!cloudCode) return { kind: "skipped" };
+
+  const result = await cloudCode.fetchQuota();
+  if (result.status === "credential_missing") {
+    attempts.push({
+      source: "auth-json",
+      status: "skipped",
+      error: "credentials_missing",
+    });
+    return { kind: "skipped" };
+  }
+  if (result.status === "credential_unusable") {
+    attempts.push({
+      source: "auth-json",
+      status: "skipped",
+      error: result.error,
+    });
+    return { kind: "skipped" };
+  }
+
+  if (result.status === "auth_rejected") {
+    attempts.push({
+      source: "api",
+      status: "failed",
+      error: result.error,
+      credentialPresent: true,
+    });
+    // Soft expiry of a refreshable credential is not a sign-out: the quota is
+    // unreadable until Antigravity's own client refreshes it.
+    return result.storedExpired && result.refreshable
+      ? {
+          kind: "verdict",
+          status: "unavailable",
+          error: result.error,
+          authStatus: "expired_refreshable",
+          reason: "credentials_expired",
+        }
+      : {
+          kind: "verdict",
+          status: "auth_required",
+          error: result.error,
+          authStatus: "unusable",
+        };
+  }
+
+  if (result.status === "not_entitled") {
+    attempts.push({
+      source: "api",
+      status: "failed",
+      error: result.error,
+      credentialPresent: true,
+    });
+    // The credential itself is fine, so this is an entitlement fact, not a
+    // sign-in prompt.
+    return {
+      kind: "verdict",
+      status: "error",
+      error: result.error,
+      authStatus: "usable",
+    };
+  }
+
+  if (result.status === "rate_limited") {
+    const error = new AgyHttpError(429);
+    attempts.push({ source: "api", status: "failed", error: error.message });
+    return { kind: "failure", error };
+  }
+
+  if (result.status === "unavailable") {
+    attempts.push({ source: "api", status: "failed", error: result.error });
+    return { kind: "failure", error: new AgyUnavailableError(result.error) };
+  }
+
+  const summary = normalizeAgyQuotaSummary(result.summary);
+  if (!summary) {
+    const error = "Antigravity account has no active quota windows";
+    attempts.push({ source: "api", status: "failed", error });
+    return { kind: "failure", error: new AgyMalformedResponseError(error) };
+  }
+
+  attempts.push({ source: "api", status: "success", credentialPresent: true });
+  return {
+    kind: "quota",
+    quota: {
+      ...successProvider({
+        provider: "agy",
+        label: "Antigravity",
+        source: "oauth",
+        ...(result.email ? { account: { email: result.email } } : {}),
+        windows: summary.windows,
+        refreshedAt: summary.refreshedAt,
+        sourcesTried: sourceNames(attempts),
+        attempts,
+      }),
+      state: {
+        status: "fresh",
+        stale: false,
+        refreshedAt: summary.refreshedAt,
+        authStatus: "usable",
+        sourcesTried: sourceNames(attempts),
+      },
+    },
+  };
+}
+
+function directVerdict(
+  verdict: Extract<AgyDirectOutcome, { kind: "verdict" }>,
+  sourcesTried: string[],
+  attempts: SourceAttempt[],
+): ProviderQuota {
+  const failed = failedProvider({
+    provider: "agy",
+    label: "Antigravity",
+    status: verdict.status,
+    error: verdict.error,
+    sourcesTried,
+    attempts,
+  });
+  return {
+    ...failed,
+    state: {
+      ...failed.state,
+      authStatus: verdict.authStatus,
+      ...(verdict.reason ? { reason: verdict.reason } : {}),
+    },
+  };
 }
 
 export async function inspectAuth(
@@ -154,31 +334,75 @@ export async function inspectAuth(
 export async function inspectAuthWithRuntime(
   runtime: AgyProbeRuntime,
 ): Promise<AuthProviderReport> {
+  const sources: AuthSourceReport[] = [];
   try {
     const endpoints = await discoverAgyEndpoints(
       runtime,
       createProbeDeadline(),
     );
-    return {
-      provider: "agy",
-      sources: [
-        {
-          source: "loopback",
-          status: endpoints.length > 0 ? "available" : "missing",
-        },
-      ],
-    };
+    sources.push({
+      source: "loopback",
+      status: endpoints.length > 0 ? "available" : "missing",
+    });
   } catch (error) {
-    return {
-      provider: "agy",
-      sources: [
-        {
-          source: "loopback",
-          status: "error",
-          error: errorMessage(error),
-        },
-      ],
-    };
+    sources.push({
+      source: "loopback",
+      status: "error",
+      error: errorMessage(error),
+    });
+  }
+
+  const credentialSource = await inspectCloudCodeCredential(runtime);
+  if (credentialSource) sources.push(credentialSource);
+  return { provider: "agy", sources };
+}
+
+async function inspectCloudCodeCredential(
+  runtime: AgyProbeRuntime,
+): Promise<AuthSourceReport | undefined> {
+  const cloudCode = runtime.cloudCode;
+  if (!cloudCode) return undefined;
+  const resolution = await cloudCode.inspectCredential();
+  const path = collapseHome(piAntigravityAuthFilePath());
+  switch (resolution.status) {
+    case "available":
+      return {
+        source: "auth-json",
+        path,
+        status: "available",
+        credentialPresent: true,
+      };
+    case "expired":
+      return {
+        source: "auth-json",
+        path,
+        status: "expired",
+        error: "access_token_expired",
+        credentialPresent: true,
+      };
+    case "missing":
+      return { source: "auth-json", path, status: "missing" };
+    case "unsupported":
+      return {
+        source: "auth-json",
+        path,
+        status: "invalid",
+        error: "unsupported_credential_type",
+      };
+    case "invalid":
+      return {
+        source: "auth-json",
+        path,
+        status: "invalid",
+        error: "invalid_credential",
+      };
+    default:
+      return {
+        source: "auth-json",
+        path,
+        status: "error",
+        error: "credential_resolution_failed",
+      };
   }
 }
 
@@ -477,18 +701,26 @@ async function readProcessList(
   const effectiveUid = process.geteuid?.();
   if (effectiveUid === undefined)
     throw new AgyDiscoveryError("Antigravity process discovery failed");
-  try {
-    return await withinProbeBudget(deadline, PROCESS_TIMEOUT_MS, (timeoutMs) =>
-      runtime.execFileText(
-        "ps",
-        ["-x", "-u", String(effectiveUid), "-o", "pid=,command="],
-        timeoutMs,
-      ),
-    );
-  } catch (error) {
-    if (error instanceof AgyProbeBudgetError) throw error;
-    throw new AgyDiscoveryError("Antigravity process discovery failed");
+  // procps-ng rejects the BSD `-x` flag ("must set personality to get -x
+  // option"), so fall back to the same selection without it before giving up.
+  const argumentSets = [
+    ["-x", "-u", String(effectiveUid), "-o", "pid=,command="],
+    ["-u", String(effectiveUid), "-o", "pid=,command="],
+  ];
+  for (const [index, args] of argumentSets.entries()) {
+    try {
+      return await withinProbeBudget(
+        deadline,
+        PROCESS_TIMEOUT_MS,
+        (timeoutMs) => runtime.execFileText("ps", args, timeoutMs),
+      );
+    } catch (error) {
+      if (error instanceof AgyProbeBudgetError) throw error;
+      if (index === argumentSets.length - 1)
+        throw new AgyDiscoveryError("Antigravity process discovery failed");
+    }
   }
+  throw new AgyDiscoveryError("Antigravity process discovery failed");
 }
 
 async function readListeningPorts(
@@ -1037,4 +1269,5 @@ function httpErrorMessage(status: number): string {
 const defaultRuntime: AgyProbeRuntime = {
   execFileText,
   requestJson: requestLoopbackJson,
+  cloudCode: defaultCloudCodeSource,
 };

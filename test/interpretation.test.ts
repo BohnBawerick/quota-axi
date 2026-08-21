@@ -497,19 +497,6 @@ describe("quota semantics", () => {
       unresolvedWindowIds: ["premium_interactions"],
     });
 
-    const agy = withQuotaSemantics(
-      provider("agy", [
-        window("gemini_5h", "session", 100),
-        window("gemini_weekly", "weekly", 98),
-      ]),
-      GENERATED_AT,
-    );
-    expect(agy.quotaSemantics).toMatchObject({
-      status: "unknown",
-      effectiveAvailability: [],
-      unresolvedWindowIds: ["gemini_5h", "gemini_weekly"],
-    });
-
     const kimi = withQuotaSemantics(
       provider("kimi", [
         window("weekly", "weekly", 59),
@@ -798,5 +785,63 @@ describe("per-scope selection signal", () => {
       withQuotaSemantics(missingCycle, GENERATED_AT).quotaSemantics
         ?.effectiveAvailability[0]?.selection,
     ).toEqual({ status: "unknown", unmeasurableWindowIds: ["seven_day"] });
+  });
+});
+
+describe("Antigravity group semantics", () => {
+  it("keeps each model group its own scope instead of collapsing them", () => {
+    const result = withQuotaSemantics(
+      provider("agy", [
+        window("gemini_5h", "session", 3),
+        window("gemini_weekly", "weekly", 35),
+        window("claude_gpt_weekly", "weekly", 0),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("known");
+    expect(
+      result.quotaSemantics?.effectiveAvailability.map(
+        ({ scope, effectivePercentRemaining, boundedBy }) => ({
+          scope,
+          effectivePercentRemaining,
+          boundedBy,
+        }),
+      ),
+    ).toEqual([
+      {
+        scope: "gemini_models",
+        effectivePercentRemaining: 3,
+        boundedBy: ["gemini_5h", "gemini_weekly"],
+      },
+      {
+        scope: "claude_gpt_models",
+        effectivePercentRemaining: 0,
+        boundedBy: ["claude_gpt_weekly"],
+      },
+    ]);
+  });
+
+  it("leaves an unfamiliar window unresolved rather than folding it into a group", () => {
+    const result = withQuotaSemantics(
+      provider("agy", [
+        window("gemini_5h", "session", 40),
+        window("mystery", "unknown", 10),
+      ]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("partial");
+    expect(result.quotaSemantics?.unresolvedWindowIds).toEqual(["mystery"]);
+    expect(
+      result.quotaSemantics?.effectiveAvailability.map(({ scope }) => scope),
+    ).toEqual(["gemini_models"]);
+  });
+
+  it("reports no effective percentage when there are no windows", () => {
+    const result = withQuotaSemantics(provider("agy", []), GENERATED_AT);
+
+    expect(result.quotaSemantics?.status).toBe("unknown");
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([]);
   });
 });
