@@ -318,12 +318,16 @@ describe("renderQuotaTui structure", () => {
   it("summarizes the fleet in the dim header with local time", () => {
     const lines = render();
     expect(lines[0]).toBe(
+      "  quota-axi · 2026-08-06 16:21 PDT · 3 live · 3 signed out · 3 hidden",
+    );
+    const allLines = render({ all: true });
+    expect(allLines[0]).toBe(
       "  quota-axi · 2026-08-06 16:21 PDT · 3 live · 3 signed out",
     );
   });
 
   it("zips live provider cards two-up with live providers first", () => {
-    const lines = render();
+    const lines = render({ all: true });
     const title = findLine(lines, "● claude");
     expect(title).toMatch(
       /^╭─ ● claude ─+ max · oauth ─╮ {2}╭─ ● codex ─+ pro · oauth ─╮$/,
@@ -333,6 +337,16 @@ describe("renderQuotaTui structure", () => {
     expect(grokTitle).toMatch(
       /^╭─ ● grok ─+ web ─╮ {2}╭─ ○ cursor ─+ signed out ─╮$/,
     );
+  });
+
+  it("hides providers with no quota data by default", () => {
+    const lines = render();
+    expect(lines.join("\n")).toContain("● claude");
+    expect(lines.join("\n")).toContain("● codex");
+    expect(lines.join("\n")).toContain("● grok");
+    expect(lines.join("\n")).not.toContain("○ cursor");
+    expect(lines.join("\n")).not.toContain("○ copilot");
+    expect(lines.join("\n")).not.toContain("○ kimi");
   });
 
   it("keeps every line within the effective width and aligns card borders", () => {
@@ -541,7 +555,7 @@ describe("renderQuotaTui structure", () => {
 
   it("aligns unequal two-up cards with padding inside the shorter box", () => {
     const lines = render();
-    const rowStart = lines.findIndex((line) => line.includes("● grok"));
+    const rowStart = lines.findIndex((line) => line.includes("● claude"));
     const rowEnd = lines.findIndex(
       (line, index) => index > rowStart && line === "",
     );
@@ -652,14 +666,34 @@ describe("renderQuotaTui structure", () => {
     expect(lines.join("\n")).not.toContain("projected empty");
   });
 
-  it("renders signed-out providers as dim cards excluded from totals", () => {
-    const lines = render();
+  it("renders signed-out providers as dim cards excluded from totals when showing all", () => {
+    const lines = render({ all: true });
     findLine(lines, "○ cursor");
     findLine(lines, "Cursor sign-in required");
     findLine(lines, "unsupported credential type");
     expect(lines.join("\n").match(/excluded from fleet totals/g)).toHaveLength(
       3,
     );
+  });
+
+  it("displays a single line message when all providers are hidden", () => {
+    const response: QuotaAxiResponse = {
+      generatedAt: GENERATED_AT,
+      schemaVersion: 5,
+      providers: [
+        signedOutProvider("cursor", "Cursor sign-in required"),
+        signedOutProvider("copilot", "GitHub Copilot sign-in required"),
+        signedOutProvider("kimi", "unsupported_credential_type"),
+      ],
+    };
+    const lines = renderQuotaTui(response, {
+      timeZone: "America/Los_Angeles",
+    }).split("\n");
+    expect(lines[0]).toBe(
+      "  quota-axi · 2026-08-06 16:21 PDT · 0 live · 3 signed out · 3 hidden",
+    );
+    expect(lines[1]).toBe("");
+    expect(lines[2]).toBe("  no providers with usable quota data");
   });
 
   it("leaves the pace marker to the bars instead of a legend line", () => {

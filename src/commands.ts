@@ -60,7 +60,12 @@ async function quotaTuiReport(
   flags: QuotaFlags,
   options: ProviderOptions,
 ): Promise<string> {
-  const frame = (response: QuotaAxiResponse, footerHint?: string): string =>
+  let currentShowAll = flags.all;
+  const frame = (
+    response: QuotaAxiResponse,
+    footerHint?: string,
+    showAll?: boolean,
+  ): string =>
     renderQuotaTui(redactedResponse(response, flags.full), {
       columns: process.stdout.columns,
       colorDepth: detectTuiColorDepth(
@@ -68,22 +73,32 @@ async function quotaTuiReport(
         process.stdout.isTTY === true,
       ),
       full: flags.full,
+      all: showAll ?? flags.all,
       ...(footerHint === undefined ? {} : { footerHint }),
     });
 
   if (flags.once || !isInteractiveTerminal()) {
-    return frame(await loadQuota(flags.providers, options, false));
+    return frame(
+      await loadQuota(flags.providers, options, false),
+      undefined,
+      flags.all,
+    );
   }
 
   const refreshSeconds = flags.refreshSeconds ?? DEFAULT_REFRESH_SECONDS;
-  const hint = `Press q to quit · refreshing every ${formatInterval(refreshSeconds)}`;
+  const hint = (showAll: boolean): string =>
+    `Press a to ${showAll ? "hide empty" : "show all"} · press q to quit · refreshing every ${formatInterval(refreshSeconds)}`;
   const last = await runLiveTui<QuotaAxiResponse>({
     load: () => loadQuota(flags.providers, options, true),
-    render: (response) => frame(response, hint),
+    render: (response, showAll) => frame(response, hint(showAll), showAll),
     intervalMillis: refreshSeconds * 1000,
     io: processLiveTuiIo(),
+    initialShowAll: flags.all,
+    onShowAllChange: (showAll) => {
+      currentShowAll = showAll;
+    },
   });
-  return last === undefined ? "" : frame(last);
+  return last === undefined ? "" : frame(last, undefined, currentShowAll);
 }
 
 function isInteractiveTerminal(): boolean {

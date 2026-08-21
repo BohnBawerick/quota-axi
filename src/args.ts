@@ -18,6 +18,8 @@ export type QuotaFlags = {
   refreshSeconds?: number;
   /** Render one `--tui` frame and exit instead of staying live. */
   once: boolean;
+  /** Show all providers in TUI, including signed-out, failed, or empty ones. */
+  all: boolean;
 };
 
 /** Refresh bounds: fast enough to feel live, slow enough to stay polite. */
@@ -78,6 +80,7 @@ function parseCommonFlags(
   let full = false;
   let tui = false;
   let once = false;
+  let all = false;
   let refreshSeconds: number | undefined;
   let allowKeychainPrompt = false;
   let intelligence: IntelligenceBucket | undefined;
@@ -102,6 +105,10 @@ function parseCommonFlags(
     }
     if (arg === "--once") {
       once = true;
+      continue;
+    }
+    if (arg === "--all") {
+      all = true;
       continue;
     }
     if (arg === "--refresh") {
@@ -188,6 +195,7 @@ function parseCommonFlags(
     full,
     tui,
     once,
+    all,
     allowKeychainPrompt,
     ...(refreshSeconds !== undefined ? { refreshSeconds } : {}),
     ...(intelligence ? { intelligence } : {}),

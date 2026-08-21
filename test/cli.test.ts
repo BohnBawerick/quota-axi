@@ -100,11 +100,13 @@ describe("CLI flag parsing", () => {
         full: true,
         tui: false,
         once: false,
+        all: false,
         allowKeychainPrompt: true,
       },
     );
     expect(parseFlags(["--tui"]).tui).toBe(true);
     expect(parseFlags(["--tui", "--once"]).once).toBe(true);
+    expect(parseFlags(["--tui", "--all"]).all).toBe(true);
   });
 
   it("parses whole-unit refresh intervals for the live report", () => {
@@ -707,6 +709,43 @@ describe("CLI quota rendering", () => {
     expect(output).not.toContain("Press q to quit");
     expect(output).not.toContain("\x1b[?1049h");
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it("hides empty providers by default in --tui and shows them with --all", async () => {
+    useTempCache();
+    PROVIDERS.codex = providerWithQuota(freshCodexQuota());
+    PROVIDERS.copilot = providerWithQuota(signedOutCopilotQuota());
+    const defaultOutput = await capture([
+      "--tui",
+      "--provider",
+      "codex,copilot",
+    ]);
+
+    expect(defaultOutput).toContain("╭─ ● codex ");
+    expect(defaultOutput).not.toContain("copilot");
+    expect(defaultOutput).toContain("1 live · 1 signed out · 1 hidden");
+
+    const allOutput = await capture([
+      "--tui",
+      "--all",
+      "--provider",
+      "codex,copilot",
+    ]);
+
+    expect(allOutput).toContain("╭─ ● codex ");
+    expect(allOutput).toContain("○ copilot");
+    expect(allOutput).toContain("1 live · 1 signed out");
+    expect(allOutput).not.toContain("hidden");
+  });
+
+  it("renders a single-line message when every provider is hidden in --tui", async () => {
+    useTempCache();
+    PROVIDERS.copilot = providerWithQuota(signedOutCopilotQuota());
+    const output = await capture(["--tui", "--provider", "copilot"]);
+
+    expect(output).toContain("0 live · 1 signed out · 1 hidden");
+    expect(output).toContain("no providers with usable quota data");
+    expect(output).not.toContain("○ copilot");
   });
 });
 

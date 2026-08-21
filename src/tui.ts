@@ -21,6 +21,8 @@ export type TuiOptions = {
   colorDepth?: TuiColorDepth;
   /** Mirrors `--full`: appends account identity and source-attempt footers. */
   full?: boolean;
+  /** Show all providers, including signed-out, failed, or zero-window ones. */
+  all?: boolean;
   /** IANA time zone for header/absolute times; defaults to the system zone. */
   timeZone?: string;
   /** Dim closing line used by the live report for its key hint. */
@@ -131,17 +133,34 @@ export function renderQuotaTui(
   const generatedAtMs = Date.parse(response.generatedAt);
   const timeZone = options.timeZone;
 
+  const showAll = options.all ?? false;
+  const visibleProviders = showAll
+    ? response.providers
+    : response.providers.filter(hasUsableQuota);
+  const hiddenCount = response.providers.length - visibleProviders.length;
+
   const ordered = [
-    ...response.providers.filter(isLive),
-    ...response.providers.filter((provider) => !isLive(provider)),
+    ...visibleProviders.filter(isLive),
+    ...visibleProviders.filter((provider) => !isLive(provider)),
   ];
   const cards = ordered.map((provider) => buildCard(provider, generatedAtMs));
 
   const lines: Line[] = [];
-  lines.push([{ text: `  ${headerText(response, timeZone)}`, style: "dim" }]);
+  lines.push([
+    {
+      text: `  ${headerText(response, timeZone, showAll ? 0 : hiddenCount)}`,
+      style: "dim",
+    },
+  ]);
   lines.push([]);
-  lines.push(...layoutCards(cards, twoColumn));
-  if (options.full) {
+  if (cards.length === 0) {
+    lines.push([
+      { text: "  no providers with usable quota data", style: "dim" },
+    ]);
+  } else {
+    lines.push(...layoutCards(cards, twoColumn));
+  }
+  if (options.full && ordered.length > 0) {
     lines.push([]);
     for (const provider of ordered) {
       for (const footerLine of fullFooterLines(provider, columns - 2)) {
@@ -161,11 +180,28 @@ export function renderQuotaTui(
     .join("\n");
 }
 
+export function hasUsableQuota(provider: ProviderQuota): boolean {
+  return provider.windows.some(hasNumericWindow);
+}
+
+function hasNumericWindow(window: QuotaWindow): boolean {
+  return (
+    Number.isFinite(window.percentRemaining) ||
+    Number.isFinite(window.percentUsed) ||
+    Number.isFinite(window.spentUsd) ||
+    Number.isFinite(window.limitUsd)
+  );
+}
+
 function isLive(provider: ProviderQuota): boolean {
   return provider.state.status === "fresh" || provider.state.status === "stale";
 }
 
-function headerText(response: QuotaAxiResponse, timeZone?: string): string {
+function headerText(
+  response: QuotaAxiResponse,
+  timeZone?: string,
+  hiddenCount = 0,
+): string {
   const live = response.providers.filter(isLive).length;
   const signedOut = response.providers.filter(
     (provider) => provider.state.status === "auth_required",
@@ -178,6 +214,7 @@ function headerText(response: QuotaAxiResponse, timeZone?: string): string {
     `${signedOut} signed out`,
   ];
   if (failed > 0) parts.push(`${failed} unavailable`);
+  if (hiddenCount > 0) parts.push(`${hiddenCount} hidden`);
   return parts.filter(Boolean).join(" · ");
 }
 

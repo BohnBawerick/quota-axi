@@ -177,6 +177,41 @@ describe("live terminal report loop", () => {
     await run;
   });
 
+  it("toggles showAll on 'a' key press without refetching or resetting the interval", async () => {
+    const io = harness();
+    const source = counting();
+    let currentShowAll = false;
+
+    const run = runLiveTui<number>({
+      load: source.load,
+      render: (value, showAll) => `frame ${value} all=${showAll}`,
+      intervalMillis: 300_000,
+      io: io.io,
+      onShowAllChange: (showAll) => {
+        currentShowAll = showAll;
+      },
+    });
+    await flush();
+
+    expect(io.output()).toContain("frame 1 all=false");
+    expect(currentShowAll).toBe(false);
+
+    io.press("a");
+    await flush();
+    expect(io.output()).toContain("frame 1 all=true");
+    expect(currentShowAll).toBe(true);
+    expect(source.calls()).toBe(1);
+
+    io.press("a");
+    await flush();
+    expect(io.output()).toContain("frame 1 all=false");
+    expect(currentShowAll).toBe(false);
+    expect(source.calls()).toBe(1);
+
+    io.press("q");
+    await run;
+  });
+
   it("quits on the raw-mode Ctrl+C byte and on a termination signal", async () => {
     for (const quit of [
       (io: Harness) => io.press(String.fromCharCode(3)),

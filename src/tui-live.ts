@@ -31,9 +31,11 @@ export type LiveTuiOptions<T> = {
   /** Refresh the report. Bounded by the caller, not by this loop. */
   load(): Promise<T>;
   /** Render the current snapshot at the current terminal width. */
-  render(value: T): string;
+  render(value: T, showAll: boolean): string;
   intervalMillis: number;
   io: LiveTuiIo;
+  initialShowAll?: boolean;
+  onShowAllChange?(showAll: boolean): void;
 };
 
 const ENTER_SCREEN = "\x1b[?1049h\x1b[?25l";
@@ -42,8 +44,9 @@ const CLEAR_SCREEN = "\x1b[H\x1b[2J";
 /** `q`, plus Ctrl+C and Ctrl+D, which raw mode delivers as data, not signals. */
 // eslint-disable-next-line no-control-regex
 const QUIT_KEY_PATTERN = /[qQ\x03\x04]/;
+const TOGGLE_ALL_KEY_PATTERN = /[aA]/;
 
-type WakeReason = "tick" | "resize" | "quit";
+type WakeReason = "tick" | "resize" | "quit" | "toggle";
 
 /**
  * Run the live report until the operator quits, and return the last snapshot
@@ -54,8 +57,11 @@ export async function runLiveTui<T>({
   render,
   intervalMillis,
   io,
+  initialShowAll = false,
+  onShowAllChange,
 }: LiveTuiOptions<T>): Promise<T | undefined> {
   let quit = false;
+  let showAll = initialShowAll;
   let wake: ((reason: WakeReason) => void) | undefined;
   // Resize bursts coalesce: every wake-up repaints at the current terminal
   // width, so an event that lands with no waiter armed is already covered by
@@ -71,7 +77,13 @@ export async function runLiveTui<T>({
   };
   const onData = (chunk: Buffer | string): void => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    if (QUIT_KEY_PATTERN.test(text)) requestQuit();
+    if (QUIT_KEY_PATTERN.test(text)) {
+      requestQuit();
+    } else if (TOGGLE_ALL_KEY_PATTERN.test(text)) {
+      showAll = !showAll;
+      onShowAllChange?.(showAll);
+      notify("toggle");
+    }
   };
 
   const stopResize = io.onResize?.(() => {
@@ -91,7 +103,7 @@ export async function runLiveTui<T>({
       if (quit) break;
       const snapshot = value;
       const paint = (): void => {
-        io.stdout.write(`${CLEAR_SCREEN}${render(snapshot)}\n`);
+        io.stdout.write(`${CLEAR_SCREEN}${render(snapshot, showAll)}\n`);
       };
       paint();
 
@@ -105,8 +117,11 @@ export async function runLiveTui<T>({
           const reason = await new Promise<WakeReason>((resolve) => {
             wake = resolve;
           });
-          if (reason !== "resize") break;
-          paint();
+          if (reason === "resize" || reason === "toggle") {
+            paint();
+          } else {
+            break;
+          }
         }
       } finally {
         wake = undefined;
