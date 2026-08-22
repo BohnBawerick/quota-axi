@@ -5,8 +5,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
-const originalCwd = process.cwd();
 let tempDir: string | undefined;
+
+/**
+ * Fake the current directory. `process.chdir()` throws in vitest's `threads`
+ * pool, which mutation runners force, and there is no per-thread cwd to set.
+ */
+function useCwd(dir: string): void {
+  vi.spyOn(process, "cwd").mockReturnValue(dir);
+}
 
 afterEach(() => {
   vi.doUnmock("node:os");
@@ -16,7 +23,7 @@ afterEach(() => {
   if (originalClaudeConfigDir === undefined)
     delete process.env.CLAUDE_CONFIG_DIR;
   else process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir;
-  process.chdir(originalCwd);
+  vi.restoreAllMocks();
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   tempDir = undefined;
 });
@@ -98,9 +105,9 @@ describe("claudeCredentialContextId", () => {
     mkdirSync(join(second, ".claude-profile"), { recursive: true });
     process.env.CLAUDE_CONFIG_DIR = ".claude-profile";
 
-    process.chdir(first);
+    useCwd(first);
     const firstId = claudeCredentialContextId();
-    process.chdir(second);
+    useCwd(second);
     const secondId = claudeCredentialContextId();
 
     expect(firstId).toMatch(/^[a-f0-9]{64}$/);

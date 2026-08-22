@@ -57,6 +57,14 @@ function useTempHome(): string {
   process.env.USERPROFILE = tempDir;
   process.env.XDG_CACHE_HOME = join(tempDir, "cache");
   delete process.env.CLAUDE_CONFIG_DIR;
+  // In vitest's `threads` pool, which mutation runners force, `process.env` is
+  // a worker-local copy that never reaches libuv, so `os.homedir()` keeps
+  // returning the developer's real home and these tests read real credentials.
+  const home = tempDir;
+  vi.doMock("node:os", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("node:os")>();
+    return { ...actual, default: actual, homedir: () => home };
+  });
   return tempDir;
 }
 
