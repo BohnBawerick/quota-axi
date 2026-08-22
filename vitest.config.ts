@@ -16,5 +16,17 @@ export default defineConfig({
     // vitest's 5s default. They then fail for lack of time rather than for a
     // real defect, which is the worst kind of red.
     testTimeout: 30_000,
+    // The TUI decides its colour depth from the ambient environment
+    // (src/tui.ts detectTuiColorDepth, called from src/commands.ts with the
+    // real process.env and process.stdout). Tests inject their own stdout sink
+    // and then assert on plain text, so an ambient FORCE_COLOR turns three
+    // card-grid assertions in test/cli.test.ts red on one machine and green on
+    // another. Pin both inputs: FORCE_COLOR "0" is "not forced", after which
+    // NO_COLOR settles the answer at "none" whatever TERM, COLORTERM or the
+    // TTY say.
+    env: {
+      FORCE_COLOR: "0",
+      NO_COLOR: "1",
+    },
   },
 });
