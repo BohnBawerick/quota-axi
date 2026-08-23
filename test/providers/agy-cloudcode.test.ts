@@ -7,6 +7,7 @@ import {
   type AgyCloudCodeRuntime,
 } from "../../src/providers/agy-cloudcode.js";
 import type { PiAntigravityCredentialResolution } from "../../src/providers/pi-antigravity-credential.js";
+import type { AgyRefreshOutcome } from "../../src/providers/agy-refresh.js";
 
 describe("Antigravity Cloud Code quota read", () => {
   it("reads the quota summary from a locally stored credential", async () => {
@@ -232,3 +233,154 @@ function fixture(): unknown {
     ),
   ) as unknown;
 }
+
+describe("Antigravity credential renewal on 401", () => {
+  /** Runtime whose responses vary per call, plus an injected renewal. */
+  function renewingRuntime(options: {
+    origin?: "agy-cli" | "pi";
+    refreshable?: boolean;
+    responses: Response[];
+    renewal: AgyRefreshOutcome;
+  }): {
+    runtime: AgyCloudCodeRuntime;
+    bearers: string[];
+    refreshCalls: number;
+  } {
+    const bearers: string[] = [];
+    let refreshCalls = 0;
+    const queue = [...options.responses];
+    const runtime: AgyCloudCodeRuntime = {
+      credentials: {
+        resolve: async () => ({
+          status: "expired",
+          credential: "stale-access-token",
+          refreshable: options.refreshable ?? true,
+          origin: options.origin ?? "agy-cli",
+          path: "/home/x/.gemini/antigravity-cli/antigravity-oauth-token",
+        }),
+      },
+      fetch: (async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+        bearers.push(
+          String(new Headers(init.headers).get("authorization") ?? ""),
+        );
+        return queue.shift() ?? jsonResponse(500, {});
+      }) as typeof globalThis.fetch,
+      refresh: async () => {
+        refreshCalls += 1;
+        return options.renewal;
+      },
+    };
+    return {
+      runtime,
+      bearers,
+      get refreshCalls() {
+        return refreshCalls;
+      },
+    };
+  }
+
+  it("renews a rejected token and reads the quota with the new one", async () => {
+    const harness = renewingRuntime({
+      responses: [jsonResponse(401, {}), jsonResponse(200, fixture())],
+      renewal: { status: "renewed", accessToken: "renewed-access-token" },
+    });
+
+    const result = await fetchCloudCodeQuotaSummary(harness.runtime);
+
+    expect(result.status).toBe("quota");
+    expect(harness.refreshCalls).toBe(1);
+    expect(harness.bearers).toEqual([
+      "Bearer stale-access-token",
+      "Bearer renewed-access-token",
+    ]);
+  });
+
+  it("keeps today's verdict when the renewal is refused", async () => {
+    const harness = renewingRuntime({
+      responses: [jsonResponse(401, {})],
+      renewal: { status: "rejected" },
+    });
+
+    const result = await fetchCloudCodeQuotaSummary(harness.runtime);
+
+    expect(result).toMatchObject({
+      status: "auth_rejected",
+      error: "Antigravity access token expired",
+    });
+  });
+
+  it("keeps today's verdict when renewal is not configured", async () => {
+    const harness = renewingRuntime({
+      responses: [jsonResponse(401, {})],
+      renewal: { status: "not_configured" },
+    });
+
+    expect(await fetchCloudCodeQuotaSummary(harness.runtime)).toMatchObject({
+      status: "auth_rejected",
+    });
+  });
+
+  it("does not harden a renewal transport failure into a sign-out", async () => {
+    const harness = renewingRuntime({
+      responses: [jsonResponse(401, {})],
+      renewal: { status: "unavailable" },
+    });
+
+    expect(await fetchCloudCodeQuotaSummary(harness.runtime)).toEqual({
+      status: "unavailable",
+      error: "Antigravity token renewal unavailable",
+    });
+  });
+
+  it("re-reports a 401 that survives the renewal", async () => {
+    const harness = renewingRuntime({
+      responses: [jsonResponse(401, {}), jsonResponse(401, {})],
+      renewal: { status: "renewed", accessToken: "renewed-access-token" },
+    });
+
+    expect(await fetchCloudCodeQuotaSummary(harness.runtime)).toMatchObject({
+      status: "auth_rejected",
+    });
+    expect(harness.refreshCalls).toBe(1);
+  });
+
+  it("leaves Pi's store to Pi rather than renewing it", async () => {
+    const harness = renewingRuntime({
+      origin: "pi",
+      responses: [jsonResponse(401, {})],
+      renewal: { status: "renewed", accessToken: "renewed-access-token" },
+    });
+
+    expect(await fetchCloudCodeQuotaSummary(harness.runtime)).toMatchObject({
+      status: "auth_rejected",
+    });
+    expect(harness.refreshCalls).toBe(0);
+  });
+
+  it("does not renew a credential with no refresh token", async () => {
+    const harness = renewingRuntime({
+      refreshable: false,
+      responses: [jsonResponse(401, {})],
+      renewal: { status: "renewed", accessToken: "renewed-access-token" },
+    });
+
+    await fetchCloudCodeQuotaSummary(harness.runtime);
+
+    expect(harness.refreshCalls).toBe(0);
+  });
+
+  it.each([
+    [403, "not_entitled"],
+    [429, "rate_limited"],
+  ])("never renews on HTTP %i", async (status, expected) => {
+    const harness = renewingRuntime({
+      responses: [jsonResponse(status, {})],
+      renewal: { status: "renewed", accessToken: "renewed-access-token" },
+    });
+
+    expect((await fetchCloudCodeQuotaSummary(harness.runtime)).status).toBe(
+      expected,
+    );
+    expect(harness.refreshCalls).toBe(0);
+  });
+});

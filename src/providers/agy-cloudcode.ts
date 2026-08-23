@@ -1,5 +1,10 @@
 import { VERSION } from "../version.js";
 import {
+  defaultAgyRefreshRuntime,
+  refreshAgyCliCredential,
+  type AgyRefreshOutcome,
+} from "./agy-refresh.js";
+import {
   createAntigravityCredentialBroker,
   type AntigravityCredentialBroker,
   type AntigravityCredentialResolution,
@@ -56,11 +61,20 @@ export type AgyCloudCodeResult =
 export type AgyCloudCodeRuntime = {
   credentials: AntigravityCredentialBroker;
   fetch: typeof globalThis.fetch;
+  /**
+   * Optional so an existing runtime literal stays valid; when absent the
+   * real first-party renewal is used.
+   */
+  refresh?: () => Promise<AgyRefreshOutcome>;
 };
+
+const defaultRefresh = (): Promise<AgyRefreshOutcome> =>
+  refreshAgyCliCredential(defaultAgyRefreshRuntime);
 
 export const defaultCloudCodeRuntime: AgyCloudCodeRuntime = {
   credentials: createAntigravityCredentialBroker(),
   fetch: (input, init) => globalThis.fetch(input, init),
+  refresh: defaultRefresh,
 };
 
 /** The direct-read port the adapter depends on, so tests can substitute it. */
@@ -109,6 +123,35 @@ export async function fetchCloudCodeQuotaSummary(
     response = await requestQuotaSummary(resolution.credential, runtime.fetch);
   } catch (error) {
     return { status: "unavailable", error: transportError(error) };
+  }
+
+  // A 401 on the store `agy` owns is the one moment renewal is worth
+  // spending: the alternative is reporting a signed-in user as signed out
+  // because they have not opened Antigravity in the last hour. One attempt
+  // only, so a dead refresh token cannot loop. 403 is an entitlement fact and
+  // 429 is back-pressure, and neither is retried.
+  if (
+    response.status === 401 &&
+    resolution.origin === "agy-cli" &&
+    resolution.refreshable
+  ) {
+    const renewal = await (runtime.refresh ?? defaultRefresh)();
+    if (renewal.status === "renewed") {
+      try {
+        response = await requestQuotaSummary(
+          renewal.accessToken,
+          runtime.fetch,
+        );
+      } catch (error) {
+        return { status: "unavailable", error: transportError(error) };
+      }
+    } else if (renewal.status === "unavailable") {
+      // A transport failure during renewal must not harden into a sign-out.
+      return {
+        status: "unavailable",
+        error: "Antigravity token renewal unavailable",
+      };
+    }
   }
 
   if (response.status === 401) {
