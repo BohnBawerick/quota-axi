@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { readCachedProvider } from "../cache.js";
 import { readJsonFileResult, type JsonFileReadResult } from "../lib/fs.js";
 import { nowIso, retryAfterToIso } from "../lib/time.js";
+import {
+  refreshGrokCliCredential,
+  type GrokRefreshOutcome,
+} from "./grok-refresh.js";
 import type {
   AuthProviderReport,
   AuthSourceReport,
@@ -75,6 +79,8 @@ type CliCredentialCandidate = {
   credentials: GrokCredentials;
   localState: "valid" | "expired";
   refreshable: boolean;
+  /** Auth-file record key, so a renewal writes back to the right record. */
+  scope?: string;
 };
 
 type CredentialState =
@@ -87,7 +93,7 @@ type CredentialState =
 
 /** Opaque attempt payloads for the shared credential-selection loop. */
 type GrokAttemptCredential =
-  | { kind: "cli"; credentials: GrokCredentials }
+  | { kind: "cli"; credentials: GrokCredentials; scope?: string }
   | { kind: "pi-local" }
   | { kind: "pi-probe"; token: string };
 
@@ -99,6 +105,8 @@ type CredentialCandidate = GrokCredentials & {
 
 const GROK_SIGN_IN_REQUIRED_ERROR = "Grok sign-in required";
 const GROK_ACCESS_TOKEN_EXPIRED_ERROR = "Grok access token expired";
+const GROK_REFRESH_UNAVAILABLE_ERROR = "Grok token renewal unavailable";
+const GROK_QUOTA_EXHAUSTED_ERROR = "Grok credits exhausted";
 
 type NormalizedGrokQuota = {
   account?: ProviderQuota["account"];
@@ -113,10 +121,18 @@ type ProtoField = VarintField | ByteField;
 
 type GrokDependencies = {
   piXaiBroker: PiXaiCredentialBroker;
+  refreshCliCredential: (
+    scope: string | undefined,
+  ) => Promise<GrokRefreshOutcome>;
 };
 
 const defaultGrokDependencies: GrokDependencies = {
   piXaiBroker: createPiXaiCredentialBroker(),
+  refreshCliCredential: (scope) =>
+    refreshGrokCliCredential(scope, {
+      fetch: (input, init) => globalThis.fetch(input, init),
+      authFilePath: grokAuthFile,
+    }),
 };
 
 export function createGrokAdapter(
@@ -163,6 +179,7 @@ async function fetchQuotaWithDependencies(
         credential: {
           kind: "cli" as const,
           credentials: candidate.credentials,
+          ...(candidate.scope !== undefined ? { scope: candidate.scope } : {}),
         },
         ...(candidate.localState === "expired"
           ? { refreshable: candidate.refreshable }
@@ -189,7 +206,7 @@ async function fetchQuotaWithDependencies(
   }
 
   const selection = await selectCredential(candidates, (candidate) =>
-    attemptGrokCandidate(candidate.credential),
+    attemptGrokCandidate(candidate.credential, dependencies),
   );
 
   const attempts = grokAttempts(cliState, piResolution, selection);
@@ -270,7 +287,13 @@ async function fetchQuotaWithDependencies(
   }
 
   let finalError: string;
-  if (authStatus === "expired_refreshable") {
+  if (selection.exhausted) {
+    // Being out of credits is a fact about the account, not about the
+    // credential. Reporting the auth verdict here is what made quota-axi tell
+    // a signed-in user to go and log in again, and it buried the one number
+    // they needed: how long until the credits come back.
+    finalError = GROK_QUOTA_EXHAUSTED_ERROR;
+  } else if (authStatus === "expired_refreshable") {
     finalError = hasRefreshableCliCandidate(cliState)
       ? GROK_ACCESS_TOKEN_EXPIRED_ERROR
       : "Pi xAI access token expired";
@@ -292,9 +315,10 @@ async function fetchQuotaWithDependencies(
     failedProvider({
       provider: "grok",
       label: "Grok",
-      status: retryAfter
-        ? "rate_limited"
-        : grokStatusForAuthFailure(finalError, authStatus),
+      status:
+        retryAfter || selection.exhausted
+          ? "rate_limited"
+          : grokStatusForAuthFailure(finalError, authStatus),
       error: finalError,
       retryAfter,
       sourcesTried: sourceNames(attempts),
@@ -306,25 +330,31 @@ async function fetchQuotaWithDependencies(
 
 async function attemptGrokCandidate(
   payload: GrokAttemptCredential,
+  dependencies: GrokDependencies,
 ): Promise<AttemptOutcome<NormalizedGrokQuota>> {
   if (payload.kind === "cli") {
-    try {
-      const quota = await fetchGrokConsumerQuota(payload.credentials);
-      return { kind: "quota", result: quota };
-    } catch (error) {
-      const message = errorMessage(error);
-      if (error instanceof RateLimitError) {
-        return {
-          kind: "transient",
-          error: message,
-          retryAfter: error.retryAfter,
-        };
-      }
-      if (isDefinitiveGrokAuthError(message)) {
-        return { kind: "rejected", error: message };
-      }
-      return { kind: "transient", error: message };
+    const first = await attemptGrokCliQuota(payload.credentials);
+    if (first.kind !== "rejected") return first;
+
+    // The stored credential is definitively rejected, which is precisely when
+    // xAI's own refresh grant is worth spending: the alternative is reporting
+    // a sign-out at someone who is signed in and simply idle. One attempt
+    // only, so a dead refresh token cannot loop.
+    const renewal = await dependencies.refreshCliCredential(payload.scope);
+    if (renewal.status === "renewed") {
+      const retried = await attemptGrokCliQuota({
+        ...payload.credentials,
+        key: renewal.accessToken,
+      });
+      // A rejection after a successful renewal is a real rejection; anything
+      // else is this attempt's own outcome.
+      return retried;
     }
+    // A transport failure during renewal must not harden into a sign-out.
+    if (renewal.status === "unavailable") {
+      return { kind: "transient", error: GROK_REFRESH_UNAVAILABLE_ERROR };
+    }
+    return first;
   }
   if (payload.kind === "pi-local") {
     // A stored-valid Pi credential is trusted locally without a model
@@ -333,6 +363,29 @@ async function attemptGrokCandidate(
     return { kind: "live_no_quota" };
   }
   return probePiXaiLiveness(payload.token);
+}
+
+async function attemptGrokCliQuota(
+  credentials: GrokCredentials,
+): Promise<AttemptOutcome<NormalizedGrokQuota>> {
+  try {
+    const quota = await fetchGrokConsumerQuota(credentials);
+    return { kind: "quota", result: quota };
+  } catch (error) {
+    const message = errorMessage(error);
+    if (error instanceof RateLimitError) {
+      return {
+        kind: "transient",
+        error: message,
+        retryAfter: error.retryAfter,
+        ...(error instanceof ResourceExhaustedError ? { exhausted: true } : {}),
+      };
+    }
+    if (isDefinitiveGrokAuthError(message)) {
+      return { kind: "rejected", error: message };
+    }
+    return { kind: "transient", error: message };
+  }
 }
 
 async function probePiXaiLiveness(
@@ -804,7 +857,7 @@ function throwForGrpcStatus(
   if (status === 16) throw new SafeGrokError(GROK_SIGN_IN_REQUIRED_ERROR);
   if (status === 7 && grpcMessageIndicatesAuthFailure(message))
     throw new SafeGrokError(GROK_SIGN_IN_REQUIRED_ERROR);
-  if (status === 8) throw new RateLimitError();
+  if (status === 8) throw new ResourceExhaustedError();
   throw new SafeGrokError("Grok quota unavailable");
 }
 
@@ -1034,6 +1087,7 @@ function extractCredentialState(
       ? ("expired" as const)
       : ("valid" as const),
     refreshable: candidate.hasRefreshToken,
+    ...(candidate.scope !== undefined ? { scope: candidate.scope } : {}),
   }));
   if (candidates.length > 0) {
     const status = candidates.some(
@@ -1256,5 +1310,16 @@ class TimeoutError extends SafeGrokError {
 class RateLimitError extends SafeGrokError {
   constructor(readonly retryAfter?: string) {
     super("Grok quota endpoint rate limited");
+  }
+}
+
+/**
+ * gRPC `RESOURCE_EXHAUSTED`. A subclass of the rate-limit error so every
+ * existing transient path keeps treating it as transient, while callers that
+ * care can tell "the account is out of credits" from "slow down".
+ */
+class ResourceExhaustedError extends RateLimitError {
+  constructor() {
+    super(undefined);
   }
 }

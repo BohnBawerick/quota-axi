@@ -47,7 +47,13 @@ export type ProviderAuthStatus = "usable" | "expired_refreshable" | "unusable";
 
 export type ProviderStateReason =
   | "keychain_access_required"
-  | "credentials_expired";
+  | "credentials_expired"
+  /**
+   * The credential authenticates and the account is simply out of quota. Kept
+   * distinct from `credentials_expired` so a consumer never offers a re-login
+   * remedy to someone whose only problem is an empty wallet.
+   */
+  | "quota_exhausted";
 
 export type QuotaPaceStatus = "ahead" | "on_pace" | "behind" | "unknown";
 

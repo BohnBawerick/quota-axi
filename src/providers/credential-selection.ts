@@ -70,7 +70,18 @@ export type AttemptOutcome<R> =
   /** Definitive authentication rejection (HTTP 401/403 or equivalent). */
   | { kind: "rejected"; error: string }
   /** Transport, decoding, rate-limit, or server failure; not an auth verdict. */
-  | { kind: "transient"; error: string; retryAfter?: string };
+  | {
+      kind: "transient";
+      error: string;
+      retryAfter?: string;
+      /**
+       * The provider said the account is out of quota, not that the
+       * credential is bad. Additive and optional: a provider that cannot tell
+       * the two apart simply omits it. Callers use it to stop an auth verdict
+       * from overwriting a true exhaustion fact.
+       */
+      exhausted?: boolean;
+    };
 
 /** Candidate identity without credential material, safe to serialize. */
 export type SelectedCandidate = {
@@ -83,6 +94,7 @@ export type CandidateResult = SelectedCandidate & {
   outcome: AttemptOutcome<never>["kind"] | "not_tried";
   error?: string;
   retryAfter?: string;
+  exhausted?: boolean;
 };
 
 export type CredentialSelectionOutcome =
@@ -106,6 +118,8 @@ export type CredentialSelection<R> = {
   /** First transient failure, when one stopped the loop. */
   transientError?: string;
   retryAfter?: string;
+  /** True when the transient failure that stopped the loop was exhaustion. */
+  exhausted?: boolean;
   /**
    * True when a rejected or untried expired candidate has a locally-owned
    * refresh path, so negative verdicts stay soft expiry instead of sign-out.
@@ -139,6 +153,7 @@ export async function selectCredential<C, R>(
   let retryAfter: string | undefined;
   let tried = 0;
   let rejectedCount = 0;
+  let exhausted: boolean | undefined;
 
   for (const candidate of ordered) {
     tried += 1;
@@ -172,8 +187,10 @@ export async function selectCredential<C, R>(
     }
     record.error = outcome.error;
     record.retryAfter = outcome.retryAfter;
+    record.exhausted = outcome.exhausted;
     transientError = outcome.error;
     retryAfter = outcome.retryAfter;
+    exhausted = outcome.exhausted;
     break;
   }
 
@@ -190,6 +207,7 @@ export async function selectCredential<C, R>(
       winner: liveWinner,
       transientError,
       retryAfter,
+      exhausted,
       refreshable,
       results,
     };
@@ -199,6 +217,7 @@ export async function selectCredential<C, R>(
       outcome: "transient",
       transientError,
       retryAfter,
+      exhausted,
       refreshable,
       results,
     };

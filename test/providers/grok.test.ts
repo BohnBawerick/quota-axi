@@ -1778,3 +1778,162 @@ async function captureCli(argv: string[]): Promise<string> {
   });
   return chunks.join("");
 }
+
+describe("grok credential renewal and exhaustion", () => {
+  const PAST = "2020-01-01T00:00:00.000Z";
+
+  function writeExpiredRefreshableAuth(key = "expired-key"): void {
+    writeAuth({
+      "https://auth.x.ai::client-abc": {
+        key,
+        auth_mode: "oidc",
+        expires_at: PAST,
+        refresh_token: "stored-refresh-token",
+        oidc_issuer: "https://auth.x.ai",
+        oidc_client_id: "client-abc",
+      },
+    });
+  }
+
+  function adapterWith(
+    refreshCliCredential: (
+      scope: string | undefined,
+    ) => Promise<
+      | { status: "renewed"; accessToken: string }
+      | { status: "rejected" | "unavailable" | "not_configured" }
+    >,
+  ) {
+    return createGrokAdapter({
+      piXaiBroker: {
+        resolve: async () => ({ status: "missing" }),
+        inspect: async () => ({ status: "missing" }),
+      },
+      refreshCliCredential,
+    });
+  }
+
+  it("renews a rejected session token and reports the quota it then reads", async () => {
+    writeExpiredRefreshableAuth();
+    const bearers: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const authorization =
+        new Headers(init.headers).get("authorization") ?? "";
+      bearers.push(authorization);
+      return authorization.includes("renewed-key")
+        ? grpcResponse()
+        : grpcResponse(new Uint8Array(), { raw: true, status: 401 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const refresh = vi.fn(async () => ({
+      status: "renewed" as const,
+      accessToken: "renewed-key",
+    }));
+
+    const result = await adapterWith(refresh).fetchQuota({
+      allowKeychainPrompt: false,
+    });
+
+    expect(refresh).toHaveBeenCalledWith("https://auth.x.ai::client-abc");
+    expect(result.state.status).toBe("fresh");
+    expect(result.state.authStatus).toBe("usable");
+    expect(result.windows.length).toBeGreaterThan(0);
+    expect(bearers).toHaveLength(2);
+    expect(bearers[0]).not.toBe(bearers[1]);
+  });
+
+  it("keeps the sign-out verdict when the refresh token is dead too", async () => {
+    writeExpiredRefreshableAuth();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        grpcResponse(new Uint8Array(), { raw: true, status: 401 }),
+      ),
+    );
+
+    const result = await adapterWith(async () => ({
+      status: "rejected" as const,
+    })).fetchQuota({ allowKeychainPrompt: false });
+
+    expect(result.state.error).toBe("Grok access token expired");
+    expect(result.state.authStatus).toBe("expired_refreshable");
+  });
+
+  it("does not harden a renewal transport failure into a sign-out", async () => {
+    writeExpiredRefreshableAuth();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        grpcResponse(new Uint8Array(), { raw: true, status: 401 }),
+      ),
+    );
+
+    const result = await adapterWith(async () => ({
+      status: "unavailable" as const,
+    })).fetchQuota({ allowKeychainPrompt: false });
+
+    // The token really is expired, so that stays the headline. What must not
+    // happen is a hard sign-out verdict off the back of a network failure.
+    expect(result.state.status).toBe("unavailable");
+    expect(result.state.authStatus).toBe("expired_refreshable");
+    // The renewal attempt is still visible as evidence.
+    expect(
+      result.attempts?.some(
+        (attempt) => attempt.error === "Grok token renewal unavailable",
+      ),
+    ).toBe(true);
+  });
+
+  it("leaves a working credential alone rather than renewing it", async () => {
+    writeValidAuth();
+    stubSuccessfulFetch();
+    const refresh = vi.fn(async () => ({
+      status: "renewed" as const,
+      accessToken: "unused",
+    }));
+
+    const result = await adapterWith(refresh).fetchQuota({
+      allowKeychainPrompt: false,
+    });
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(result.state.status).toBe("fresh");
+  });
+
+  it("reports exhausted credits instead of telling a signed-in user to log in", async () => {
+    writeExpiredRefreshableAuth();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => grpcResponse(consumerPayload(), { trailerStatus: 8 })),
+    );
+    const refresh = vi.fn(async () => ({ status: "not_configured" as const }));
+
+    const result = await adapterWith(refresh).fetchQuota({
+      allowKeychainPrompt: false,
+    });
+
+    // RESOURCE_EXHAUSTED is transient, so no renewal is spent on it.
+    expect(refresh).not.toHaveBeenCalled();
+    expect(result.state.error).toBe("Grok credits exhausted");
+    expect(result.state.status).toBe("rate_limited");
+    expect(result.state.status).not.toBe("auth_required");
+  });
+
+  it("stamps quota_exhausted and offers no re-login remedy", async () => {
+    writeExpiredRefreshableAuth();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => grpcResponse(consumerPayload(), { trailerStatus: 8 })),
+    );
+    const response = JSON.parse(
+      await captureCli(["quota", "--provider", "grok", "--json"]),
+    ) as QuotaAxiResponse;
+    const grok = response.providers.find(
+      (provider) => provider.provider === "grok",
+    );
+    expect(grok?.state.reason).toBe("quota_exhausted");
+    expect(grok?.state.remedyCommand).toBeUndefined();
+    expect(response.help ?? []).not.toContain(
+      "Tell your user: open the Grok CLI (`grok`) once so it can refresh Grok's local session token.",
+    );
+  });
+});

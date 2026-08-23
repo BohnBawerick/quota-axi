@@ -8,6 +8,8 @@ export const KEYCHAIN_ACCESS_REASON = "keychain_access_required";
 export const KEYCHAIN_ACCESS_REMEDY_COMMAND =
   "quota-axi --allow-keychain-prompt";
 export const CREDENTIALS_EXPIRED_REASON = "credentials_expired";
+export const QUOTA_EXHAUSTED_REASON = "quota_exhausted";
+export const GROK_QUOTA_EXHAUSTED_ERROR = "Grok credits exhausted";
 export const GROK_TOKEN_REFRESH_REMEDY_COMMAND = "grok";
 export const GROK_ACCESS_TOKEN_EXPIRED_ERROR = "Grok access token expired";
 export const CLAUDE_TOKEN_REFRESH_REMEDY_COMMAND = "claude";
@@ -48,6 +50,12 @@ function annotateProviderAdvice(provider: ProviderQuota): ProviderQuota {
       },
     };
   }
+  if (needsGrokExhaustionAdvice(provider)) {
+    return {
+      ...provider,
+      state: { ...provider.state, reason: QUOTA_EXHAUSTED_REASON },
+    };
+  }
   if (needsGrokTokenRefreshAdvice(provider)) {
     return {
       ...provider,
@@ -78,6 +86,18 @@ function needsKeychainAccessAdvice(provider: ProviderQuota): boolean {
     !attempts.some((attempt) => attempt.status === "success") &&
     attempts.some(isBlockedCredentialAttempt) &&
     attempts.some(isPromptBlockedKeychainAttempt)
+  );
+}
+
+/**
+ * Exhaustion is checked before the refresh advice and carries no remedy
+ * command: no amount of signing in again returns a credit that resets on the
+ * provider's own clock. The window data already carries when that is.
+ */
+function needsGrokExhaustionAdvice(provider: ProviderQuota): boolean {
+  return (
+    provider.provider === "grok" &&
+    provider.state.error === GROK_QUOTA_EXHAUSTED_ERROR
   );
 }
 
