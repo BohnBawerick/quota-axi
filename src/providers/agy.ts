@@ -363,7 +363,8 @@ async function inspectCloudCodeCredential(
   const cloudCode = runtime.cloudCode;
   if (!cloudCode) return undefined;
   const resolution = await cloudCode.inspectCredential();
-  const path = collapseHome(piAntigravityAuthFilePath());
+  // Name the store the credential actually came from, not a fixed guess.
+  const path = collapseHome(resolution.path ?? piAntigravityAuthFilePath());
   switch (resolution.status) {
     case "available":
       return {

@@ -1,9 +1,9 @@
 import { VERSION } from "../version.js";
 import {
-  createPiAntigravityCredentialBroker,
-  type PiAntigravityCredentialBroker,
-  type PiAntigravityCredentialResolution,
-} from "./pi-antigravity-credential.js";
+  createAntigravityCredentialBroker,
+  type AntigravityCredentialBroker,
+  type AntigravityCredentialResolution,
+} from "./antigravity-credential.js";
 
 /**
  * Antigravity's own quota-read RPC, reached directly instead of through a
@@ -54,19 +54,19 @@ export type AgyCloudCodeResult =
   | { status: "unavailable"; error: string };
 
 export type AgyCloudCodeRuntime = {
-  credentials: PiAntigravityCredentialBroker;
+  credentials: AntigravityCredentialBroker;
   fetch: typeof globalThis.fetch;
 };
 
 export const defaultCloudCodeRuntime: AgyCloudCodeRuntime = {
-  credentials: createPiAntigravityCredentialBroker(),
+  credentials: createAntigravityCredentialBroker(),
   fetch: (input, init) => globalThis.fetch(input, init),
 };
 
 /** The direct-read port the adapter depends on, so tests can substitute it. */
 export type AgyCloudCodeSource = {
   fetchQuota(): Promise<AgyCloudCodeResult>;
-  inspectCredential(): Promise<PiAntigravityCredentialResolution>;
+  inspectCredential(): Promise<AntigravityCredentialResolution>;
 };
 
 export function createCloudCodeSource(
